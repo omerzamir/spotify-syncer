@@ -9,6 +9,7 @@ Create a unique clientID and clientSecret for your app located at https://develo
 Add the redirectURI in the project `http://localhost:8080/callback` to the list of redirect URIs in the spotify application settings page. You may replace this if you like.
 
 Create a new playlist that you would like to be synced with your liked songs. you do not have to create one if you already have a playlist you wish to sync. add the name of this playlist to the variable on `main.go:23`
+
 **_important note: this app will add and remove items from the playlist, so be sure that you use either a new playlist or be completely ok with the existing playlist getting changed._**
 
 After replacing the above variables, run the command `go build`.
