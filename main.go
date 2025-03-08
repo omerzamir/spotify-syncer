@@ -2,152 +2,229 @@
 // In order to run this example yourself, you'll need to:
 //
 //  1. Register an application at: https://developer.spotify.com/my-applications/
-//       - Use "http://localhost:8080/callback" as the redirect URI
+//     - Use "http://localhost:8080/callback" as the redirect URI
 //  2. Set the SPOTIFY_ID environment variable to the client ID you got in step 1.
 //  3. Set the SPOTIFY_SECRET environment variable to the client secret from step 1.
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"time"
+
+	mapset "github.com/deckarep/golang-set/v2"
+
+	"github.com/pkg/browser"
+	"github.com/spf13/viper"
 	"github.com/zmb3/spotify"
 )
 
-// redirectURI is the OAuth redirect URI for the application.
-// You must register an application at Spotify's developer portal
-// and enter this value.
-const redirectURI = "http://localhost:8080/callback"
-const clientID = "YOUR_CLIENT_ID"
-const clientSecret = "YOUR_CLIENT_SECRET"
-const publicPlaylistName = "Pauls Liked Songs "
+const (
+	Port               = "PORT"
+	RedirectURI        = "REDIRECT_URI"
+	ClientID           = "CLIENT_ID"
+	ClientSecret       = "CLIENT_SECRET"
+	PublicPlaylistName = "PUBLIC_PLAYLIST_NAME"
+	BatchSize          = 100
+	ReadTimeout        = 5 * time.Second
+	WriteTimeout       = 10 * time.Second
+	IdleTimeout        = 15 * time.Second
+)
 
 var (
-	auth  = spotify.NewAuthenticator(redirectURI, spotify.ScopeUserReadPrivate, spotify.ScopePlaylistReadPrivate, spotify.ScopeUserLibraryRead, spotify.ScopePlaylistModifyPublic)
 	ch    = make(chan *spotify.Client)
 	state = "abc123"
 )
 
-func completeAuth(w http.ResponseWriter, r *http.Request) {
-	tok, err := auth.Token(state, r)
-	if err != nil {
-		http.Error(w, "Couldn't get token", http.StatusForbidden)
-		log.Fatal(err)
+func getCompleteAuth(auth *spotify.Authenticator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, err := auth.Token(state, r)
+		if err != nil {
+			http.Error(w, "Couldn't get token", http.StatusForbidden)
+			log.Fatal(err)
+		}
+		if st := r.FormValue("state"); st != state {
+			http.NotFound(w, r)
+			log.Fatalf("State mismatch: %s != %s\n", st, state)
+		}
+		// use the token to get an authenticated client
+		client := auth.NewClient(tok)
+		fmt.Fprintf(w, "Login Completed!")
+		ch <- &client
 	}
-	if st := r.FormValue("state"); st != state {
-		http.NotFound(w, r)
-		log.Fatalf("State mismatch: %s != %s\n", st, state)
-	}
-	// use the token to get an authenticated client
-	client := auth.NewClient(tok)
-	fmt.Fprintf(w, "Login Completed!")
-	ch <- &client
 }
 
-func getLikedSongsPlaylistID(client *spotify.Client) (playlistID spotify.ID) {
+func getLikedSongsPlaylistID(client *spotify.Client, publicPlaylistName string) spotify.ID {
+	playlistID := spotify.ID("")
+
 	if playlists, err := client.CurrentUsersPlaylists(); err == nil {
 		for _, playlist := range playlists.Playlists {
-		if playlist.Name == publicPlaylistName {
-			playlistID = playlist.ID
+			if playlist.Name == publicPlaylistName {
+				playlistID = playlist.ID
+			}
 		}
-	}
 	} else {
-		fmt.Printf("err: %v", err)
+		log.Printf("err: %v", err)
 	}
-	return
+	return playlistID
 }
 
-func getLikedSongIds(client *spotify.Client) []spotify.ID {
+func getLikedSongIDs(client *spotify.Client) mapset.Set[spotify.ID] {
 	likedSongs, err := client.CurrentUsersTracks()
-	likedSongIds := make([]spotify.ID, likedSongs.Total)
 	if err != nil {
 		log.Fatal(err)
 	}
-	for page := 1; ; page++ {
-		for idx, track := range likedSongs.Tracks {
-			likedSongIds[likedSongs.Offset + idx] = track.ID
+	likedSongIDs := mapset.NewSet[spotify.ID]()
+	hasNextPage := true
+
+	for hasNextPage {
+		for _, track := range likedSongs.Tracks {
+			likedSongIDs.Add(track.ID)
 		}
-		if err := client.NextPage(likedSongs); err == spotify.ErrNoMorePages {
-			break;
+		if err = client.NextPage(likedSongs); errors.Is(err, spotify.ErrNoMorePages) {
+			hasNextPage = false
 		} else if err != nil {
 			log.Fatal(err)
 		}
 	}
-	return likedSongIds
+	return likedSongIDs
 }
 
-func getPlaylistSongIds(client *spotify.Client, playlistID spotify.ID) []spotify.ID {
+func getPlaylistSongIDs(client *spotify.Client, playlistID spotify.ID) mapset.Set[spotify.ID] {
 	playlistTracks, err := client.GetPlaylistTracks(playlistID)
-	playlistSongIds := make([]spotify.ID, playlistTracks.Total)
 	if err != nil {
 		log.Fatal(err)
 	}
-	for page := 1; ; page++ {
-		for idx, track := range playlistTracks.Tracks {
-			playlistSongIds[playlistTracks.Offset + idx] = track.Track.ID
+
+	playlistSongIDs := mapset.NewSet[spotify.ID]()
+	hasNextPage := true
+
+	for hasNextPage {
+		for _, track := range playlistTracks.Tracks {
+			playlistSongIDs.Add(track.Track.ID)
 		}
-		if err := client.NextPage(playlistTracks); err == spotify.ErrNoMorePages {
-			break;
+		if err = client.NextPage(playlistTracks); errors.Is(err, spotify.ErrNoMorePages) {
+			hasNextPage = false
 		} else if err != nil {
 			log.Fatal(err)
 		}
 	}
-	return playlistSongIds
+
+	return playlistSongIDs
 }
 
-func contains(playlist []spotify.ID, track spotify.ID) bool {
-	for _, pt := range playlist {
-		if pt == track {
-			return true
+func syncPublicPlaylistWithLikedSongs(
+	client *spotify.Client,
+	playlistID spotify.ID,
+	playlistSongs mapset.Set[spotify.ID],
+	likedSongs mapset.Set[spotify.ID],
+) {
+	log.Println("Begin Syncing")
+	songsToAdd := likedSongs.Difference(playlistSongs).ToSlice()
+	songsToRemove := playlistSongs.Difference(likedSongs).ToSlice()
+
+	for i := 0; i < len(songsToAdd); i += BatchSize {
+		end := i + BatchSize
+		if end > len(songsToAdd) {
+			end = len(songsToAdd)
+		}
+
+		batch := songsToAdd[i:end]
+		_, err := client.AddTracksToPlaylist(playlistID, batch...)
+		if err != nil {
+			log.Printf("Error adding batch of songs: %v", err)
 		}
 	}
-	return false
 
+	for i := 0; i < len(songsToRemove); i += BatchSize {
+		end := i + BatchSize
+		if end > len(songsToRemove) {
+			end = len(songsToRemove)
+		}
+
+		batch := songsToRemove[i:end]
+		_, err := client.RemoveTracksFromPlaylist(playlistID, batch...)
+		if err != nil {
+			log.Printf("Error removing song: %v", err)
+		}
+	}
+	log.Println("Sync Complete")
 }
 
-func syncPublicPlaylistWithLikedSongs(client *spotify.Client, playlistID spotify.ID, playlistSongs []spotify.ID, likedSongs []spotify.ID) {
-	fmt.Println("Begin Syncing")
+func setDefaults() {
+	viper.AutomaticEnv()
+	viper.SetDefault(Port, "8080")
 
-	for _, song := range likedSongs {
-		if(contains(playlistSongs, song) == false) {
-			_, err := client.AddTracksToPlaylist(playlistID, song)
-			if err != nil {
-				fmt.Printf("Error adding song: %v \n", err)
-			}
-		}
-	}
+	// redirectURI is the OAuth redirect URI for the application.
+	// You must register an application at Spotify's developer portal
+	// and enter this value.
+	viper.SetDefault(RedirectURI, "http://localhost:8080/callback")
+	viper.SetDefault(ClientID, "")
+	viper.SetDefault(ClientSecret, "")
+	viper.SetDefault(PublicPlaylistName, "Public Liked Songs")
 
-	for _, song := range playlistSongs {
-		if(contains(likedSongs, song) == false) {
-			_, err := client.RemoveTracksFromPlaylist(playlistID, song)
-			if err != nil {
-				fmt.Printf("Error removing song: %v \n", err)
-			}
-		}
+	viper.SetConfigType("env")
+	viper.AddConfigPath(".")
+	viper.SetConfigFile(".env")
+	err := viper.ReadInConfig()
+
+	if err != nil {
+		panic(fmt.Errorf("fatal error config file: %w", err))
 	}
-	fmt.Println("Sync Complete")
 }
 
 func main() {
-	// first start an HTTP server
-	http.HandleFunc("/callback", completeAuth)
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	setDefaults()
+
+	port := viper.GetString(Port)
+	clientID := viper.GetString(ClientID)
+	clientSecret := viper.GetString(ClientSecret)
+
+	requiredScopes := []string{
+		spotify.ScopeUserReadPrivate,
+		spotify.ScopePlaylistReadPrivate,
+		spotify.ScopeUserLibraryRead,
+		spotify.ScopePlaylistModifyPublic,
+		spotify.ScopePlaylistModifyPrivate,
+	}
+	auth := spotify.NewAuthenticator(
+		viper.GetString(RedirectURI), requiredScopes...)
+
+	server := &http.Server{
+		Addr:         ":" + port,
+		Handler:      nil,
+		ReadTimeout:  ReadTimeout,
+		WriteTimeout: WriteTimeout,
+		IdleTimeout:  IdleTimeout,
+	}
+	http.HandleFunc("/callback", getCompleteAuth(&auth))
+	http.HandleFunc("/", func(_ http.ResponseWriter, r *http.Request) {
 		log.Println("Got request for:", r.URL.String())
 	})
-	go http.ListenAndServe(":8080", nil)
+
+	go func(server *http.Server) {
+		if err := server.ListenAndServe(); err != nil {
+			log.Fatalf("failed to start server: %v", err)
+		}
+	}(server)
+
 	auth.SetAuthInfo(clientID, clientSecret)
 	url := auth.AuthURL(state)
-	fmt.Println("Please log in to Spotify by visiting the following page in your browser:", url)
+
+	log.Printf("Please log in to Spotify by visiting the following page in your browser: %s", url)
+	err := browser.OpenURL(url)
+	if err != nil {
+		log.Fatalf("could not open browser to login: %v", err)
+	}
 
 	// wait for auth to complete
 	client := <-ch
 
-	playlistID := getLikedSongsPlaylistID(client)
-	playlistSongs := getPlaylistSongIds(client, playlistID)
-	likedSongs := getLikedSongIds(client)
+	playlistID := getLikedSongsPlaylistID(client, viper.GetString(PublicPlaylistName))
+	playlistSongs := getPlaylistSongIDs(client, playlistID)
+	likedSongs := getLikedSongIDs(client)
 
 	syncPublicPlaylistWithLikedSongs(client, playlistID, playlistSongs, likedSongs)
-
-	
 }
-
