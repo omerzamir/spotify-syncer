@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/deckarep/golang-set/v2 v2.7.0
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
-	github.com/zmb3/spotify v1.3.0
+	github.com/zmb3/spotify/v2 v2.4.1
 )
 
 require (

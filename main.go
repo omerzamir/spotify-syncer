@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -18,7 +19,8 @@ import (
 
 	"github.com/pkg/browser"
 	"github.com/spf13/viper"
-	"github.com/zmb3/spotify"
+	"github.com/zmb3/spotify/v2"
+	spotifyauth "github.com/zmb3/spotify/v2/auth"
 )
 
 const (
@@ -31,16 +33,12 @@ const (
 	ReadTimeout        = 5 * time.Second
 	WriteTimeout       = 10 * time.Second
 	IdleTimeout        = 15 * time.Second
+	ConcurrentFetches  = 2
 )
 
-var (
-	ch    = make(chan *spotify.Client)
-	state = "abc123"
-)
-
-func getCompleteAuth(auth *spotify.Authenticator) http.HandlerFunc {
+func getCompleteAuth(auth *spotifyauth.Authenticator, state string, ch chan<- *spotify.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tok, err := auth.Token(state, r)
+		tok, err := auth.Token(r.Context(), state, r)
 		if err != nil {
 			http.Error(w, "Couldn't get token", http.StatusForbidden)
 			log.Fatal(err)
@@ -50,16 +48,16 @@ func getCompleteAuth(auth *spotify.Authenticator) http.HandlerFunc {
 			log.Fatalf("State mismatch: %s != %s\n", st, state)
 		}
 		// use the token to get an authenticated client
-		client := auth.NewClient(tok)
+		client := spotify.New(auth.Client(r.Context(), tok))
 		fmt.Fprintf(w, "Login Completed!")
-		ch <- &client
+		ch <- client
 	}
 }
 
-func getLikedSongsPlaylistID(client *spotify.Client, publicPlaylistName string) spotify.ID {
+func getLikedSongsPlaylistID(ctx context.Context, client *spotify.Client, publicPlaylistName string) spotify.ID {
 	playlistID := spotify.ID("")
 
-	if playlists, err := client.CurrentUsersPlaylists(); err == nil {
+	if playlists, err := client.CurrentUsersPlaylists(ctx); err == nil {
 		for _, playlist := range playlists.Playlists {
 			if playlist.Name == publicPlaylistName {
 				playlistID = playlist.ID
@@ -71,8 +69,8 @@ func getLikedSongsPlaylistID(client *spotify.Client, publicPlaylistName string) 
 	return playlistID
 }
 
-func getLikedSongIDs(client *spotify.Client) mapset.Set[spotify.ID] {
-	likedSongs, err := client.CurrentUsersTracks()
+func getLikedSongIDs(ctx context.Context, client *spotify.Client) mapset.Set[spotify.ID] {
+	likedSongs, err := client.CurrentUsersTracks(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -83,7 +81,7 @@ func getLikedSongIDs(client *spotify.Client) mapset.Set[spotify.ID] {
 		for _, track := range likedSongs.Tracks {
 			likedSongIDs.Add(track.ID)
 		}
-		if err = client.NextPage(likedSongs); errors.Is(err, spotify.ErrNoMorePages) {
+		if err = client.NextPage(ctx, likedSongs); errors.Is(err, spotify.ErrNoMorePages) {
 			hasNextPage = false
 		} else if err != nil {
 			log.Fatal(err)
@@ -92,8 +90,8 @@ func getLikedSongIDs(client *spotify.Client) mapset.Set[spotify.ID] {
 	return likedSongIDs
 }
 
-func getPlaylistSongIDs(client *spotify.Client, playlistID spotify.ID) mapset.Set[spotify.ID] {
-	playlistTracks, err := client.GetPlaylistTracks(playlistID)
+func getPlaylistSongIDs(ctx context.Context, client *spotify.Client, playlistID spotify.ID) mapset.Set[spotify.ID] {
+	playlistItems, err := client.GetPlaylistItems(ctx, playlistID)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -102,10 +100,12 @@ func getPlaylistSongIDs(client *spotify.Client, playlistID spotify.ID) mapset.Se
 	hasNextPage := true
 
 	for hasNextPage {
-		for _, track := range playlistTracks.Tracks {
-			playlistSongIDs.Add(track.Track.ID)
+		for _, item := range playlistItems.Items {
+			if item.Track.Track != nil {
+				playlistSongIDs.Add(item.Track.Track.ID)
+			}
 		}
-		if err = client.NextPage(playlistTracks); errors.Is(err, spotify.ErrNoMorePages) {
+		if err = client.NextPage(ctx, playlistItems); errors.Is(err, spotify.ErrNoMorePages) {
 			hasNextPage = false
 		} else if err != nil {
 			log.Fatal(err)
@@ -116,6 +116,7 @@ func getPlaylistSongIDs(client *spotify.Client, playlistID spotify.ID) mapset.Se
 }
 
 func syncPublicPlaylistWithLikedSongs(
+	ctx context.Context,
 	client *spotify.Client,
 	playlistID spotify.ID,
 	playlistSongs mapset.Set[spotify.ID],
@@ -132,7 +133,7 @@ func syncPublicPlaylistWithLikedSongs(
 		}
 
 		batch := songsToAdd[i:end]
-		_, err := client.AddTracksToPlaylist(playlistID, batch...)
+		_, err := client.AddTracksToPlaylist(ctx, playlistID, batch...)
 		if err != nil {
 			log.Printf("Error adding batch of songs: %v", err)
 		}
@@ -145,7 +146,7 @@ func syncPublicPlaylistWithLikedSongs(
 		}
 
 		batch := songsToRemove[i:end]
-		_, err := client.RemoveTracksFromPlaylist(playlistID, batch...)
+		_, err := client.RemoveTracksFromPlaylist(ctx, playlistID, batch...)
 		if err != nil {
 			log.Printf("Error removing song: %v", err)
 		}
@@ -178,19 +179,26 @@ func setDefaults() {
 func main() {
 	setDefaults()
 
+	ch := make(chan *spotify.Client)
+	state := "abc123"
+
 	port := viper.GetString(Port)
 	clientID := viper.GetString(ClientID)
 	clientSecret := viper.GetString(ClientSecret)
 
 	requiredScopes := []string{
-		spotify.ScopeUserReadPrivate,
-		spotify.ScopePlaylistReadPrivate,
-		spotify.ScopeUserLibraryRead,
-		spotify.ScopePlaylistModifyPublic,
-		spotify.ScopePlaylistModifyPrivate,
+		spotifyauth.ScopeUserReadPrivate,
+		spotifyauth.ScopePlaylistReadPrivate,
+		spotifyauth.ScopeUserLibraryRead,
+		spotifyauth.ScopePlaylistModifyPublic,
+		spotifyauth.ScopePlaylistModifyPrivate,
 	}
-	auth := spotify.NewAuthenticator(
-		viper.GetString(RedirectURI), requiredScopes...)
+	auth := spotifyauth.New(
+		spotifyauth.WithRedirectURL(viper.GetString(RedirectURI)),
+		spotifyauth.WithScopes(requiredScopes...),
+		spotifyauth.WithClientID(clientID),
+		spotifyauth.WithClientSecret(clientSecret),
+	)
 
 	server := &http.Server{
 		Addr:         ":" + port,
@@ -199,7 +207,7 @@ func main() {
 		WriteTimeout: WriteTimeout,
 		IdleTimeout:  IdleTimeout,
 	}
-	http.HandleFunc("/callback", getCompleteAuth(&auth))
+	http.HandleFunc("/callback", getCompleteAuth(auth, state, ch))
 	http.HandleFunc("/", func(_ http.ResponseWriter, r *http.Request) {
 		log.Println("Got request for:", r.URL.String())
 	})
@@ -210,7 +218,6 @@ func main() {
 		}
 	}(server)
 
-	auth.SetAuthInfo(clientID, clientSecret)
 	url := auth.AuthURL(state)
 
 	log.Printf("Please log in to Spotify by visiting the following page in your browser: %s", url)
@@ -221,10 +228,27 @@ func main() {
 
 	// wait for auth to complete
 	client := <-ch
+	ctx := context.Background()
 
-	playlistID := getLikedSongsPlaylistID(client, viper.GetString(PublicPlaylistName))
-	playlistSongs := getPlaylistSongIDs(client, playlistID)
-	likedSongs := getLikedSongIDs(client)
+	playlistID := getLikedSongsPlaylistID(ctx, client, viper.GetString(PublicPlaylistName))
 
-	syncPublicPlaylistWithLikedSongs(client, playlistID, playlistSongs, likedSongs)
+	// Fetch songs concurrently
+	var playlistSongs, likedSongs mapset.Set[spotify.ID]
+	done := make(chan bool, ConcurrentFetches)
+
+	go func() {
+		defer func() { done <- true }()
+		playlistSongs = getPlaylistSongIDs(ctx, client, playlistID)
+	}()
+
+	go func() {
+		defer func() { done <- true }()
+		likedSongs = getLikedSongIDs(ctx, client)
+	}()
+
+	// Wait for both to complete
+	<-done
+	<-done
+
+	syncPublicPlaylistWithLikedSongs(ctx, client, playlistID, playlistSongs, likedSongs)
 }
