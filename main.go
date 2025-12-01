@@ -161,7 +161,7 @@ func setDefaults() {
 	// redirectURI is the OAuth redirect URI for the application.
 	// You must register an application at Spotify's developer portal
 	// and enter this value.
-	viper.SetDefault(RedirectURI, "http://localhost:8080/callback")
+	viper.SetDefault(RedirectURI, "http://127.0.0.1:8080/callback")
 	viper.SetDefault(ClientID, "")
 	viper.SetDefault(ClientSecret, "")
 	viper.SetDefault(PublicPlaylistName, "Public Liked Songs")
