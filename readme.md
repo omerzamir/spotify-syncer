@@ -12,7 +12,7 @@ CLIENT_SECRET=<Put your Client Secret here>
 PUBLIC_PLAYLIST_NAME=<Put your public liked songs playlist here>
 ```
 
-Add the redirectURI in the project `http://localhost:8080/callback` to the list of redirect URIs in the spotify application settings page. You may replace this if you like.
+Add the redirectURI in the project `http://127.0.0.1:8080/callback` to the list of redirect URIs in the spotify application settings page. You may replace this if you like.
 
 Create a new playlist that you would like to be synced with your liked songs. you do not have to create one if you already have a playlist you wish to sync. add the name of this playlist to the variable on your `.env` file.
 
