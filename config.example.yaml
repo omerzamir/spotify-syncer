@@ -1,0 +1,47 @@
+# Spotify Syncer Configuration
+#
+# Copy this file to config.yaml and adjust values as needed.
+#
+# Spotify API credentials must be set via environment variables:
+#   export SPOTIFY_CLIENT_ID=your_client_id
+#   export SPOTIFY_CLIENT_SECRET=your_client_secret
+
+spotify:
+  # OAuth callback URI registered in the Spotify developer dashboard.
+  redirect_uri: "http://127.0.0.1:8080/callback"
+  # Local port for the OAuth callback server.
+  port: 8080
+
+sync:
+  # Name of the public mirror playlist.
+  mirror_playlist_name: "Public Liked Songs"
+  # Number of concurrent API fetch operations.
+  concurrency: 2
+  # Maximum tracks per API batch operation (Spotify limit: 100).
+  batch_size: 100
+
+genre:
+  # Maximum number of genre playlists to create.
+  max_buckets: 10
+  # Minimum tracks required for a genre to become its own playlist.
+  min_bucket_size: 20
+  # Number of genre tags to consider per artist.
+  genres_per_artist: 3
+  # Prefix for genre playlist names (e.g., "Liked -- rock").
+  bucket_playlist_prefix: "Liked -- "
+  # How long to cache artist genre data before re-fetching (30 days).
+  artist_genre_ttl: 720h
+
+rate_limit:
+  # Maximum Spotify API requests per second.
+  requests_per_second: 8.0
+  # Maximum burst of requests allowed above the steady rate.
+  burst: 4
+  # Maximum retry attempts on rate-limited (429) responses.
+  max_retries: 5
+
+# Directory for persisted state files (tokens, caches).
+state_dir: "./state"
+
+# Logging level: debug, info, warn, error.
+log_level: "info"
