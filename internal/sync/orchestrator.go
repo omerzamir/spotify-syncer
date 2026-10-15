@@ -157,6 +157,11 @@ func executePlan(
 		DuplicateIDs: spotifyIDsToStringSlice(plan.duplicateIDs),
 	}
 
+	stored, err := store.LoadCheckpoint()
+	if err != nil {
+		return RunResult{}, fmt.Errorf("loading checkpoint: %w", err)
+	}
+
 	mirrorResult, err := syncMirrorPlaylist(ctx, logger, cfg, client, store, plan.desiredTracks, opts.ForceRefresh)
 	if err != nil {
 		return RunResult{}, err
@@ -165,15 +170,31 @@ func executePlan(
 	metrics.MirrorAdded = mirrorResult.Added
 	metrics.MirrorRemoved = mirrorResult.Removed
 
+	// Genre playlists are derived from the mirror, so they are due when it
+	// changed. A genre sync that failed or was skipped on an earlier run is
+	// remembered in the checkpoint, because the mirror will not change again.
+	mirrorChanged := mirrorResult.Added+mirrorResult.Removed > 0
+	genresDue := opts.EnableGenres && (mirrorChanged || opts.ForceRefresh || stored.GenresPending)
+	pending := stored.GenresPending || mirrorChanged
+
 	message := "sync run complete"
 	genresSynced := false
 
 	switch {
 	case !opts.EnableGenres:
 		message = "sync run complete (genres disabled)"
-	case mirrorResult.Added == 0 && mirrorResult.Removed == 0 && !opts.ForceRefresh:
+	case !genresDue:
 		message = "sync run complete (genre sync skipped, no changes detected)"
 	default:
+		// Persist the pending flag first, so a failure or crash below leaves
+		// the next run to retry the genre sync.
+		if !stored.GenresPending {
+			pendingCheckpoint := cache.Checkpoint{LatestAddedAt: stored.LatestAddedAt, GenresPending: true}
+			if err = store.SaveCheckpoint(pendingCheckpoint); err != nil {
+				return RunResult{}, fmt.Errorf("saving checkpoint: %w", err)
+			}
+		}
+
 		counts, genreErr := syncGenrePlaylists(ctx, logger, cfg, client, store,
 			plan.desiredTracks, plan.trackArtists, opts.ForceRefresh, plan.refreshExpiredGenres)
 		if genreErr != nil {
@@ -183,12 +204,16 @@ func executePlan(
 		metrics.BucketsCreated = counts.BucketsCreated
 		metrics.BucketsRemoved = counts.BucketsRemoved
 		genresSynced = true
+		pending = false
 	}
 
-	if !plan.checkpoint.LatestAddedAt.IsZero() {
-		if err = store.SaveCheckpoint(plan.checkpoint); err != nil {
-			return RunResult{}, fmt.Errorf("saving checkpoint: %w", err)
-		}
+	final := cache.Checkpoint{LatestAddedAt: plan.checkpoint.LatestAddedAt, GenresPending: pending}
+	if final.LatestAddedAt.IsZero() {
+		final.LatestAddedAt = stored.LatestAddedAt
+	}
+
+	if err = store.SaveCheckpoint(final); err != nil {
+		return RunResult{}, fmt.Errorf("saving checkpoint: %w", err)
 	}
 
 	return completeRun(ctx, logger, store, &metrics, message, genresSynced), nil

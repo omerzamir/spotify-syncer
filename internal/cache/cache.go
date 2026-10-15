@@ -41,6 +41,12 @@ type ArtistGenreEntry struct {
 // Checkpoint holds the fast-mode sync checkpoint.
 type Checkpoint struct {
 	LatestAddedAt time.Time `json:"latest_added_at"`
+
+	// GenresPending is set while the genre playlists may be out of date with
+	// the mirror: the mirror changed but genre sync failed or was disabled.
+	// The next run with genres enabled syncs them even if the mirror did not
+	// change, then clears the flag.
+	GenresPending bool `json:"genres_pending,omitempty"`
 }
 
 // RunMetrics holds the summary statistics of a sync run.
