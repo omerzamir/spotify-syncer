@@ -175,7 +175,7 @@ func createMergedPlaylist(
 		return "", fmt.Errorf("creating target playlist %q: %w", mergeCfg.TargetName, err)
 	}
 
-	if err = spotifyio.BatchAddTracks(ctx, logger, client, targetID, tracks, cfg.Sync.BatchSize); err != nil {
+	if _, err = spotifyio.BatchAddTracks(ctx, logger, client, targetID, tracks, cfg.Sync.BatchSize); err != nil {
 		return "", fmt.Errorf("adding tracks to merged playlist: %w", err)
 	}
 

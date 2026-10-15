@@ -24,10 +24,10 @@ func exercise(t *testing.T, fake *spotifytest.Server) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err = spotifyio.BatchAddTracks(ctx, logger, client, id, []spotify.ID{"a", "b"}, 100); err != nil {
+	if _, err = spotifyio.BatchAddTracks(ctx, logger, client, id, []spotify.ID{"a", "b"}, 100); err != nil {
 		return "", err
 	}
-	if err = spotifyio.BatchRemoveTracks(ctx, logger, client, id, []spotify.ID{"b"}, 100); err != nil {
+	if _, err = spotifyio.BatchRemoveTracks(ctx, logger, client, id, []spotify.ID{"b"}, 100); err != nil {
 		return "", err
 	}
 	if _, err = spotifyio.FetchPlaylistTracks(ctx, logger, client, id); err != nil {

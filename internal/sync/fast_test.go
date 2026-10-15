@@ -191,3 +191,52 @@ func TestRunFastOnlyFetchesGenresForNewArtists(t *testing.T) {
 		t.Errorf("jazz bucket = %v, want [c]", got)
 	}
 }
+
+func TestRunPartialAddFailureDoesNotDuplicateTracksOnRetry(t *testing.T) {
+	fake := spotifytest.NewServer(t)
+	store := testStore(t)
+	cfg := testConfig() // batch size 100
+
+	// An empty mirror exists up front so the failure can target its ID.
+	mirrorID := fake.AddPlaylist(spotifytest.Playlist{ID: "mirror1", Name: cfg.Sync.MirrorPlaylistName})
+	addPath := "POST /playlists/" + mirrorID + "/items"
+
+	// The first run caches the mirror contents; the second adds 150 tracks in
+	// two batches and fails on the second one.
+	var want []string
+	for i := range 160 {
+		id := fmt.Sprintf("t%03d", i)
+		want = append(want, id)
+		fake.Like(likedAt(i), spotifytest.Track{ID: id, ISRC: "I" + id})
+		if i == 9 {
+			runSync(t, fake, cfg, store, sync.RunOptions{Mode: sync.ModeFull})
+		}
+	}
+
+	fake.FailAfter(addPath, 1, http.StatusInternalServerError)
+
+	if _, err := sync.Run(t.Context(), testLogger(), cfg, fake.Client(), store,
+		sync.RunOptions{Mode: sync.ModeFull}); err == nil {
+		t.Fatal("Run() error = nil, want failure from the second add batch")
+	}
+
+	if got := len(fake.PlaylistTrackIDs(mirrorID)); got != 110 {
+		t.Fatalf("mirror has %d tracks after the partial failure, want 110 (10 + one batch of 100)", got)
+	}
+
+	fake.SetStatus(addPath, 0)
+	result := runSync(t, fake, cfg, store, sync.RunOptions{Mode: sync.ModeFull})
+
+	if result.Metrics.MirrorAdded != 50 {
+		t.Errorf("retry added %d tracks, want only the 50 that failed", result.Metrics.MirrorAdded)
+	}
+
+	got := fake.PlaylistTrackIDs(mirrorID)
+	if len(got) != len(want) {
+		t.Errorf("mirror has %d entries, want %d (no duplicates)", len(got), len(want))
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("mirror tracks = %v, want each of the 160 tracks exactly once", got)
+	}
+}

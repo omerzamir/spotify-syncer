@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/omerzamir/spotify/v2"
 
@@ -111,19 +112,46 @@ func applyDiff(
 		"to_add", len(toAdd),
 		"to_remove", len(toRemove))
 
-	if err := spotifyio.BatchAddTracks(ctx, logger, client, cfg.playlistID, toAdd, cfg.batchSize); err != nil {
+	applied, err := spotifyio.BatchAddTracks(ctx, logger, client, cfg.playlistID, toAdd, cfg.batchSize)
+	if err != nil {
+		if !cache.IsCacheStaleError(err) {
+			saveAppliedState(ctx, logger, cfg, appliedState(current, toAdd[:applied], nil))
+		}
 		return syncResult{}, fmt.Errorf("adding tracks to %s playlist: %w", cfg.logContext, err)
 	}
 
-	if err := spotifyio.BatchRemoveTracks(ctx, logger, client, cfg.playlistID, toRemove, cfg.batchSize); err != nil {
+	applied, err = spotifyio.BatchRemoveTracks(ctx, logger, client, cfg.playlistID, toRemove, cfg.batchSize)
+	if err != nil {
+		if !cache.IsCacheStaleError(err) {
+			saveAppliedState(ctx, logger, cfg, appliedState(current, toAdd, toRemove[:applied]))
+		}
 		return syncResult{}, fmt.Errorf("removing tracks from %s playlist: %w", cfg.logContext, err)
 	}
 
-	if err := cfg.saveCache(cfg.desiredTracks); err != nil {
+	if err = cfg.saveCache(cfg.desiredTracks); err != nil {
 		return syncResult{}, fmt.Errorf("saving %s tracks cache: %w", cfg.logContext, err)
 	}
 
 	return syncResult{Added: len(toAdd), Removed: len(toRemove)}, nil
+}
+
+// appliedState returns the playlist contents after added tracks were appended
+// to current and removed tracks were taken out, preserving order. It is the
+// cache content to keep when a diff was only partly applied.
+func appliedState(current, added, removed []spotify.ID) []spotify.ID {
+	return set.Missing(slices.Concat(current, added), set.Of(removed...))
+}
+
+// saveAppliedState saves state to the playlist cache after a partly applied
+// diff, so the next run diffs against what the playlist really contains
+// instead of re-adding tracks that already landed. A failure is only logged:
+// the caller is already returning the error that interrupted the diff.
+func saveAppliedState(ctx context.Context, logger *slog.Logger, cfg syncConfig, state []spotify.ID) {
+	if err := cfg.saveCache(state); err != nil {
+		logger.WarnContext(ctx, "failed to save partially applied playlist state",
+			"playlist", cfg.logContext,
+			"error", err)
+	}
 }
 
 // diffTracks returns the desired tracks missing from current (in desired

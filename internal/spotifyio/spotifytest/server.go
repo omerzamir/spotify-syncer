@@ -57,6 +57,12 @@ type Playlist struct {
 	Tracks      []Track
 }
 
+// failAfterRule makes requests fail with status once okCalls have succeeded.
+type failAfterRule struct {
+	okCalls int
+	status  int
+}
+
 // Server is a fake Spotify Web API. All methods are safe for concurrent use.
 type Server struct {
 	srv *httptest.Server
@@ -69,6 +75,7 @@ type Server struct {
 	playlists    []*Playlist
 	artistGenres map[string][]string
 	statuses     map[string]int
+	failAfter    map[string]failAfterRule
 	requests     []string
 	nextID       int
 }
@@ -83,6 +90,7 @@ func NewServer(t testing.TB) *Server {
 		catalog:      make(map[string]Track),
 		artistGenres: make(map[string][]string),
 		statuses:     make(map[string]int),
+		failAfter:    make(map[string]failAfterRule),
 	}
 
 	mux := http.NewServeMux()
@@ -182,16 +190,28 @@ func (s *Server) SetArtistGenres(artistID string, genres ...string) {
 }
 
 // SetStatus makes every request matching "METHOD /path" fail with status.
-// A status of 0 clears the override.
+// A status of 0 clears the override, including one set by FailAfter.
 func (s *Server) SetStatus(methodAndPath string, status int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if status == 0 {
 		delete(s.statuses, methodAndPath)
+		delete(s.failAfter, methodAndPath)
 		return
 	}
 	s.statuses[methodAndPath] = status
+}
+
+// FailAfter lets the next okCalls requests matching "METHOD /path" succeed and
+// fails every later one with status, for testing partial failures. It replaces
+// an earlier FailAfter for the same request; SetStatus(methodAndPath, 0)
+// clears it.
+func (s *Server) FailAfter(methodAndPath string, okCalls, status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.failAfter[methodAndPath] = failAfterRule{okCalls: okCalls, status: status}
 }
 
 // DeletePlaylist removes a playlist, as if the user deleted it in Spotify.
@@ -282,6 +302,14 @@ func (s *Server) record(next http.Handler) http.Handler {
 		s.mu.Lock()
 		s.requests = append(s.requests, key)
 		status, fail := s.statuses[key]
+		if rule, ok := s.failAfter[key]; ok && !fail {
+			if rule.okCalls > 0 {
+				rule.okCalls--
+				s.failAfter[key] = rule
+			} else {
+				status, fail = rule.status, true
+			}
+		}
 		s.mu.Unlock()
 
 		if fail {

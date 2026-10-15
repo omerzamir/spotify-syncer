@@ -128,7 +128,9 @@ func findPlaylistByName(
 type batchOperation func(ctx context.Context, playlistID spotify.ID, batch []spotify.ID) error
 
 // performBatchOperation executes a batch operation on tracks, splitting them
-// into batches of the specified size.
+// into batches of the specified size. It returns how many tracks were applied
+// in fully successful batches; on error that is the length of the prefix of
+// trackIDs that is known to have been applied before the failing batch.
 func performBatchOperation(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -138,9 +140,9 @@ func performBatchOperation(
 	op batchOperation,
 	operationName string,
 	logVerb string,
-) error {
+) (int, error) {
 	if len(trackIDs) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	for i := 0; i < len(trackIDs); i += batchSize {
@@ -148,7 +150,7 @@ func performBatchOperation(
 		batch := trackIDs[i:end]
 
 		if err := op(ctx, playlistID, batch); err != nil {
-			return fmt.Errorf("%s tracks batch %d-%d to playlist %s: %w",
+			return i, fmt.Errorf("%s tracks batch %d-%d to playlist %s: %w",
 				operationName, i, end-1, playlistID, err)
 		}
 
@@ -163,12 +165,14 @@ func performBatchOperation(
 		"playlist_id", playlistID,
 		"total_tracks", len(trackIDs))
 
-	return nil
+	return len(trackIDs), nil
 }
 
 // BatchAddTracks adds tracks to a playlist in batches. The batch size is
 // determined by the Spotify API limit (100 tracks per request). Tracks are
-// added in order, with each batch being a separate API call.
+// added in order, with each batch being a separate API call. It returns the
+// number of leading tracks added by fully successful batches, which on error
+// is how much of trackIDs reached the playlist before the failure.
 func BatchAddTracks(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -176,7 +180,7 @@ func BatchAddTracks(
 	playlistID spotify.ID,
 	trackIDs []spotify.ID,
 	batchSize int,
-) error {
+) (int, error) {
 	return performBatchOperation(
 		ctx,
 		logger,
@@ -203,7 +207,9 @@ func BatchAddTracks(
 
 // BatchRemoveTracks removes tracks from a playlist in batches. The batch size
 // is determined by the Spotify API limit (100 tracks per request). Tracks are
-// removed in order, with each batch being a separate API call.
+// removed in order, with each batch being a separate API call. It returns the
+// number of leading tracks removed by fully successful batches, which on error
+// is how much of trackIDs was removed before the failure.
 func BatchRemoveTracks(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -211,7 +217,7 @@ func BatchRemoveTracks(
 	playlistID spotify.ID,
 	trackIDs []spotify.ID,
 	batchSize int,
-) error {
+) (int, error) {
 	return performBatchOperation(
 		ctx,
 		logger,

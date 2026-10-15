@@ -258,7 +258,7 @@ func cleanupStaleBucket(
 	}
 
 	if len(currentTracks) > 0 {
-		err = spotifyio.BatchRemoveTracks(
+		_, err = spotifyio.BatchRemoveTracks(
 			ctx,
 			logger,
 			client,
