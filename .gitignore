@@ -26,7 +26,7 @@ go.work.sum
 
 # env file
 .env
-spotify-syncer
+/spotify-syncer
 
 # Runtime state (tokens, caches)
 state/
@@ -34,5 +34,5 @@ state/
 # User config (contains no secrets, but is user-specific)
 config.yaml
 .cursor/.DS_Store
-syncer
+/syncer
 .cursor

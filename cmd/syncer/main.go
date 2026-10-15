@@ -26,6 +26,33 @@ const (
 	exitConfig  = 2
 )
 
+// syncSummary is the JSON summary printed to stdout after a sync run. Bucket
+// counts are pointers so they are omitted when genre sync is disabled but
+// still printed as 0 when it is enabled.
+type syncSummary struct {
+	Success        bool     `json:"success"`
+	LikedTotal     int      `json:"liked_total"`
+	DedupRemoved   int      `json:"dedup_removed"`
+	MirrorAdded    int      `json:"mirror_added"`
+	MirrorRemoved  int      `json:"mirror_removed"`
+	DurationSec    float64  `json:"duration_sec"`
+	BucketsCreated *int     `json:"buckets_created,omitempty"`
+	BucketsRemoved *int     `json:"buckets_removed,omitempty"`
+	DuplicateIDs   []string `json:"duplicate_ids,omitempty"`
+}
+
+// reverseSummary is the JSON summary printed to stdout after a reverse sync.
+type reverseSummary struct {
+	Success bool `json:"success"`
+	sync.ReverseResult
+}
+
+// mergeSummary is the JSON summary printed to stdout after a merge.
+type mergeSummary struct {
+	Success bool `json:"success"`
+	sync.MergeResult
+}
+
 func main() {
 	rootCmd := setupCommands()
 	if err := rootCmd.Execute(); err != nil {
@@ -220,22 +247,19 @@ func runSync(configPath, mode string, enableGenres, forceRefresh bool) error {
 		return fmt.Errorf("sync run failed: %w", err)
 	}
 
-	summary := map[string]interface{}{
-		"success":        result.Success,
-		"liked_total":    result.Metrics.LikedTotal,
-		"dedup_removed":  result.Metrics.DedupRemoved,
-		"mirror_added":   result.Metrics.MirrorAdded,
-		"mirror_removed": result.Metrics.MirrorRemoved,
-		"duration_sec":   result.Metrics.FinishedAt.Sub(result.Metrics.StartedAt).Seconds(),
+	summary := syncSummary{
+		Success:       result.Success,
+		LikedTotal:    result.Metrics.LikedTotal,
+		DedupRemoved:  result.Metrics.DedupRemoved,
+		MirrorAdded:   result.Metrics.MirrorAdded,
+		MirrorRemoved: result.Metrics.MirrorRemoved,
+		DurationSec:   result.Metrics.FinishedAt.Sub(result.Metrics.StartedAt).Seconds(),
+		DuplicateIDs:  result.Metrics.DuplicateIDs,
 	}
 
 	if enableGenres {
-		summary["buckets_created"] = result.Metrics.BucketsCreated
-		summary["buckets_removed"] = result.Metrics.BucketsRemoved
-	}
-
-	if len(result.Metrics.DuplicateIDs) > 0 {
-		summary["duplicate_ids"] = result.Metrics.DuplicateIDs
+		summary.BucketsCreated = &result.Metrics.BucketsCreated
+		summary.BucketsRemoved = &result.Metrics.BucketsRemoved
 	}
 
 	summaryJSON, err := json.Marshal(summary)
@@ -299,15 +323,9 @@ func runReverse(configPath, playlistIdentifier string, dryRun bool, batchSize in
 		return fmt.Errorf("reverse sync failed: %w", err)
 	}
 
-	summary := map[string]interface{}{
-		"success":       true,
-		"playlist_name": result.PlaylistName,
-		"playlist_id":   result.PlaylistID,
-		"total_tracks":  result.TotalTracks,
-		"already_liked": result.AlreadyLiked,
-		"newly_added":   result.NewlyAdded,
-		"dry_run":       result.DryRun,
-		"duration_sec":  result.DurationSec,
+	summary := reverseSummary{
+		Success:       true,
+		ReverseResult: result,
 	}
 
 	summaryJSON, err := json.Marshal(summary)
@@ -368,19 +386,9 @@ func runMerge(configPath string, sources []string, targetName string, public, de
 		return fmt.Errorf("merge failed: %w", err)
 	}
 
-	summary := map[string]interface{}{
-		"success":            true,
-		"sources":            result.Sources,
-		"target_name":        result.TargetName,
-		"total_tracks":       result.TotalTracks,
-		"unique_tracks":      result.UniqueTracks,
-		"duplicates_skipped": result.DuplicatesSkipped,
-		"dry_run":            result.DryRun,
-		"duration_sec":       result.DurationSec,
-	}
-
-	if result.TargetID != "" {
-		summary["target_id"] = result.TargetID
+	summary := mergeSummary{
+		Success:     true,
+		MergeResult: result,
 	}
 
 	summaryJSON, err := json.Marshal(summary)
