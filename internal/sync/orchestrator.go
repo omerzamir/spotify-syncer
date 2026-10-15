@@ -162,6 +162,17 @@ func executePlan(
 		return RunResult{}, fmt.Errorf("loading checkpoint: %w", err)
 	}
 
+	// Genre playlists derive from the mirror. Mark them pending before the
+	// mirror can change, so a failure part-way through the mirror or genre sync
+	// leaves the next run to sync them; the final checkpoint records the real
+	// state. A crash therefore costs at most one extra genre sync.
+	if !stored.GenresPending {
+		pendingCheckpoint := cache.Checkpoint{LatestAddedAt: stored.LatestAddedAt, GenresPending: true}
+		if err = store.SaveCheckpoint(pendingCheckpoint); err != nil {
+			return RunResult{}, fmt.Errorf("saving checkpoint: %w", err)
+		}
+	}
+
 	mirrorResult, err := syncMirrorPlaylist(ctx, logger, cfg, client, store, plan.desiredTracks, opts.ForceRefresh)
 	if err != nil {
 		return RunResult{}, err
@@ -186,15 +197,6 @@ func executePlan(
 	case !genresDue:
 		message = "sync run complete (genre sync skipped, no changes detected)"
 	default:
-		// Persist the pending flag first, so a failure or crash below leaves
-		// the next run to retry the genre sync.
-		if !stored.GenresPending {
-			pendingCheckpoint := cache.Checkpoint{LatestAddedAt: stored.LatestAddedAt, GenresPending: true}
-			if err = store.SaveCheckpoint(pendingCheckpoint); err != nil {
-				return RunResult{}, fmt.Errorf("saving checkpoint: %w", err)
-			}
-		}
-
 		counts, genreErr := syncGenrePlaylists(ctx, logger, cfg, client, store,
 			plan.desiredTracks, plan.trackArtists, opts.ForceRefresh, plan.refreshExpiredGenres)
 		if genreErr != nil {

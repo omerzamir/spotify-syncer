@@ -128,3 +128,42 @@ func TestRunSkipsGenresInSteadyState(t *testing.T) {
 	}
 	requireGenresPending(t, store, false)
 }
+
+func TestRunSyncsGenresAfterMirrorSyncFailedPartway(t *testing.T) {
+	fake := newGenreFake(t)
+	store := testStore(t)
+	cfg := genreTestConfig()
+	cfg.Sync.BatchSize = 1
+
+	runSync(t, fake, cfg, store, sync.RunOptions{Mode: sync.ModeFull, EnableGenres: true})
+
+	mirror, _ := fake.PlaylistByName(cfg.Sync.MirrorPlaylistName)
+	addPath := "POST /playlists/" + mirror.ID + "/items"
+
+	// Two new jazz likes; the first lands in the mirror, the second fails, so
+	// the run errors before reaching genre sync.
+	likeNewcomer(fake)
+	fake.Like(likedAt(11), spotifytest.Track{ID: "d", ISRC: "D", ArtistIDs: []string{"newcomer"}})
+	fake.FailAfter(addPath, 1, http.StatusInternalServerError)
+
+	if _, err := sync.Run(t.Context(), testLogger(), cfg, fake.Client(), store,
+		sync.RunOptions{Mode: sync.ModeFast, EnableGenres: true}); err == nil {
+		t.Fatal("Run() error = nil, want failure from the second add batch")
+	}
+	requireGenresPending(t, store, true)
+
+	// Make the retry add nothing: the remaining new like is unliked, so the
+	// mirror does not change and only the pending flag can trigger genres.
+	fake.SetStatus(addPath, 0)
+	fake.Unlike("d")
+
+	result := runSync(t, fake, cfg, store, sync.RunOptions{Mode: sync.ModeFast, EnableGenres: true})
+
+	if result.Metrics.MirrorAdded != 0 {
+		t.Fatalf("retry added %d tracks, want 0 so the mirror is unchanged", result.Metrics.MirrorAdded)
+	}
+	if got := mirrorTrackIDs(t, fake, "Liked -- jazz"); !slices.Equal(got, []string{"c"}) {
+		t.Errorf("jazz bucket = %v, want [c] from the track that reached the mirror", got)
+	}
+	requireGenresPending(t, store, false)
+}
