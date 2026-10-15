@@ -13,8 +13,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/pkg/browser"
-	spotifyauth "github.com/zmb3/spotify/v2/auth"
+	spotifyauth "github.com/omerzamir/spotify/v2/auth"
 	"golang.org/x/oauth2"
 
 	"spotify-syncer/internal/config"
@@ -84,10 +83,10 @@ func InteractiveLogin(
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	url := authenticator.AuthURL(state)
-	logger.InfoContext(ctx, "please visit this URL to log in to Spotify", "url", url)
+	authURL := authenticator.AuthURL(state)
+	logger.InfoContext(ctx, "please visit this URL to log in to Spotify", "url", authURL)
 
-	if browserErr := browser.OpenURL(url); browserErr != nil {
+	if browserErr := openBrowser(ctx, authURL); browserErr != nil {
 		logger.WarnContext(ctx, "could not open browser automatically, please visit the URL manually",
 			"error", browserErr)
 	}

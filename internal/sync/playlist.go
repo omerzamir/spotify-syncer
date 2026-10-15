@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/zmb3/spotify/v2"
+	"github.com/omerzamir/spotify/v2"
 
 	"spotify-syncer/internal/cache"
 	"spotify-syncer/internal/spotifyio"
@@ -34,6 +34,11 @@ func handleStalePlaylistCache(
 // if not found. Supports cache fallback if the cached playlist ID is stale (404).
 // If cachedPlaylists is provided, updates it in place. Otherwise, loads and saves
 // the playlists cache separately.
+//
+// The returned bool reports whether the playlist ID came from the cache and was
+// validated against the API. When it is false the playlist was looked up by name
+// or newly created, so any cached track contents describe a different playlist
+// and must not be trusted.
 func findOrCreatePlaylist(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -41,7 +46,7 @@ func findOrCreatePlaylist(
 	store *cache.Store,
 	name string,
 	cachedPlaylists map[string]string,
-) (spotify.ID, error) {
+) (spotify.ID, bool, error) {
 	var playlists map[string]string
 	var updateInPlace bool
 
@@ -52,7 +57,7 @@ func findOrCreatePlaylist(
 		var err error
 		playlists, err = store.LoadPlaylists()
 		if err != nil {
-			return "", fmt.Errorf("loading playlists cache: %w", err)
+			return "", false, fmt.Errorf("loading playlists cache: %w", err)
 		}
 		if playlists == nil {
 			playlists = make(map[string]string)
@@ -64,13 +69,13 @@ func findOrCreatePlaylist(
 		playlistID := spotify.ID(cachedID)
 		_, getErr := client.GetPlaylist(ctx, playlistID)
 		if getErr == nil {
-			return playlistID, nil
+			return playlistID, true, nil
 		}
 
 		if cache.IsCacheStaleError(getErr) {
 			handleStalePlaylistCache(ctx, logger, store, name, cachedID, playlists)
 		} else {
-			return "", fmt.Errorf("checking cached playlist: %w", getErr)
+			return "", false, fmt.Errorf("checking cached playlist: %w", getErr)
 		}
 	}
 
@@ -83,7 +88,7 @@ func findOrCreatePlaylist(
 		true,
 	)
 	if createErr != nil {
-		return "", fmt.Errorf("finding or creating playlist: %w", createErr)
+		return "", false, fmt.Errorf("finding or creating playlist: %w", createErr)
 	}
 
 	playlists[name] = string(playlistID)
@@ -94,5 +99,5 @@ func findOrCreatePlaylist(
 		}
 	}
 
-	return playlistID, nil
+	return playlistID, false, nil
 }

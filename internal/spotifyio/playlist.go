@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/zmb3/spotify/v2"
+	"github.com/omerzamir/spotify/v2"
 
 	"spotify-syncer/internal/cache"
 )
@@ -34,11 +34,6 @@ func FindOrCreatePlaylist(
 		fullName = prefix + name
 	}
 
-	user, err := client.CurrentUser(ctx)
-	if err != nil {
-		return "", fmt.Errorf("getting current user: %w", err)
-	}
-
 	playlistID, found, err := findPlaylistByName(ctx, client, fullName)
 	if err != nil {
 		return "", fmt.Errorf("searching for playlist %q: %w", fullName, err)
@@ -51,13 +46,45 @@ func FindOrCreatePlaylist(
 		return playlistID, nil
 	}
 
-	playlist, err := client.CreatePlaylistForUser(ctx, user.ID, fullName, "", public, false)
+	return CreatePlaylist(ctx, logger, client, fullName, "", public)
+}
+
+// CreatePlaylist creates a new, non-collaborative playlist owned by the
+// current user and returns its ID. It uses POST /me/playlists and falls back
+// to the legacy POST /users/{id}/playlists.
+func CreatePlaylist(
+	ctx context.Context,
+	logger *slog.Logger,
+	client *spotify.Client,
+	name string,
+	description string,
+	public bool,
+) (spotify.ID, error) {
+	var playlist *spotify.FullPlaylist
+
+	err := withLegacyFallback(ctx, logger, "POST /me/playlists",
+		func() error {
+			var err error
+			playlist, err = client.CreatePlaylist(ctx, name, description, public, false)
+			return err
+		},
+		func() error {
+			user, err := client.CurrentUser(ctx)
+			if err != nil {
+				return fmt.Errorf("getting current user: %w", err)
+			}
+
+			//nolint:staticcheck // SA1019: the legacy endpoint is the deliberate fallback.
+			playlist, err = client.CreatePlaylistForUser(ctx, user.ID, name, description, public, false)
+			return err
+		},
+	)
 	if err != nil {
-		return "", fmt.Errorf("creating playlist %q: %w", fullName, err)
+		return "", fmt.Errorf("creating playlist %q: %w", name, err)
 	}
 
 	logger.InfoContext(ctx, "created new playlist",
-		"name", fullName,
+		"name", name,
 		"playlist_id", playlist.ID)
 
 	return playlist.ID, nil
@@ -101,7 +128,9 @@ func findPlaylistByName(
 type batchOperation func(ctx context.Context, playlistID spotify.ID, batch []spotify.ID) error
 
 // performBatchOperation executes a batch operation on tracks, splitting them
-// into batches of the specified size.
+// into batches of the specified size. It returns how many tracks were applied
+// in fully successful batches; on error that is the length of the prefix of
+// trackIDs that is known to have been applied before the failing batch.
 func performBatchOperation(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -111,9 +140,9 @@ func performBatchOperation(
 	op batchOperation,
 	operationName string,
 	logVerb string,
-) error {
+) (int, error) {
 	if len(trackIDs) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	for i := 0; i < len(trackIDs); i += batchSize {
@@ -121,7 +150,7 @@ func performBatchOperation(
 		batch := trackIDs[i:end]
 
 		if err := op(ctx, playlistID, batch); err != nil {
-			return fmt.Errorf("%s tracks batch %d-%d to playlist %s: %w",
+			return i, fmt.Errorf("%s tracks batch %d-%d to playlist %s: %w",
 				operationName, i, end-1, playlistID, err)
 		}
 
@@ -136,12 +165,14 @@ func performBatchOperation(
 		"playlist_id", playlistID,
 		"total_tracks", len(trackIDs))
 
-	return nil
+	return len(trackIDs), nil
 }
 
 // BatchAddTracks adds tracks to a playlist in batches. The batch size is
 // determined by the Spotify API limit (100 tracks per request). Tracks are
-// added in order, with each batch being a separate API call.
+// added in order, with each batch being a separate API call. It returns the
+// number of leading tracks added by fully successful batches, which on error
+// is how much of trackIDs reached the playlist before the failure.
 func BatchAddTracks(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -149,7 +180,7 @@ func BatchAddTracks(
 	playlistID spotify.ID,
 	trackIDs []spotify.ID,
 	batchSize int,
-) error {
+) (int, error) {
 	return performBatchOperation(
 		ctx,
 		logger,
@@ -157,8 +188,17 @@ func BatchAddTracks(
 		trackIDs,
 		batchSize,
 		func(ctx context.Context, playlistID spotify.ID, batch []spotify.ID) error {
-			_, err := client.AddTracksToPlaylist(ctx, playlistID, batch...)
-			return err
+			return withLegacyFallback(ctx, logger, "POST /playlists/{id}/items",
+				func() error {
+					_, err := client.AddItemsToPlaylist(ctx, playlistID, trackURIs(batch)...)
+					return err
+				},
+				func() error {
+					//nolint:staticcheck // SA1019: the legacy endpoint is the deliberate fallback.
+					_, err := client.AddTracksToPlaylist(ctx, playlistID, batch...)
+					return err
+				},
+			)
 		},
 		"adding",
 		"added",
@@ -167,7 +207,9 @@ func BatchAddTracks(
 
 // BatchRemoveTracks removes tracks from a playlist in batches. The batch size
 // is determined by the Spotify API limit (100 tracks per request). Tracks are
-// removed in order, with each batch being a separate API call.
+// removed in order, with each batch being a separate API call. It returns the
+// number of leading tracks removed by fully successful batches, which on error
+// is how much of trackIDs was removed before the failure.
 func BatchRemoveTracks(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -175,7 +217,7 @@ func BatchRemoveTracks(
 	playlistID spotify.ID,
 	trackIDs []spotify.ID,
 	batchSize int,
-) error {
+) (int, error) {
 	return performBatchOperation(
 		ctx,
 		logger,
@@ -183,8 +225,17 @@ func BatchRemoveTracks(
 		trackIDs,
 		batchSize,
 		func(ctx context.Context, playlistID spotify.ID, batch []spotify.ID) error {
-			_, err := client.RemoveTracksFromPlaylist(ctx, playlistID, batch...)
-			return err
+			return withLegacyFallback(ctx, logger, "DELETE /playlists/{id}/items",
+				func() error {
+					_, err := client.RemoveItemsFromPlaylist(ctx, playlistID, trackURIs(batch)...)
+					return err
+				},
+				func() error {
+					//nolint:staticcheck // SA1019: the legacy endpoint is the deliberate fallback.
+					_, err := client.RemoveTracksFromPlaylist(ctx, playlistID, batch...)
+					return err
+				},
+			)
 		},
 		"removing",
 		"removed",
@@ -193,13 +244,22 @@ func BatchRemoveTracks(
 
 // UnfollowPlaylist unfollows (deletes) a playlist from the user's library.
 // This is used for cleaning up stale genre playlists that are no longer needed.
+// It uses DELETE /me/library and falls back to the legacy
+// DELETE /playlists/{id}/followers.
 func UnfollowPlaylist(
 	ctx context.Context,
 	logger *slog.Logger,
 	client *spotify.Client,
 	playlistID spotify.ID,
 ) error {
-	err := client.UnfollowPlaylist(ctx, playlistID)
+	err := withLegacyFallback(ctx, logger, "DELETE /me/library",
+		func() error {
+			return client.RemoveItemsFromLibrary(ctx, spotify.URI("spotify:playlist:"+string(playlistID)))
+		},
+		func() error {
+			return client.UnfollowPlaylist(ctx, playlistID) //nolint:staticcheck // SA1019: deliberate fallback.
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("unfollowing playlist %s: %w", playlistID, err)
 	}

@@ -1,39 +1,72 @@
-package sync
+package sync_test
 
 import (
+	"slices"
 	"testing"
 
-	"github.com/zmb3/spotify/v2"
+	"spotify-syncer/internal/spotifyio/spotifytest"
+	"spotify-syncer/internal/sync"
 )
 
-func TestMergeThreePlaylistsDeduplication(t *testing.T) {
-	s1 := []spotify.ID{"trackA", "trackB", "trackC"}
-	s2 := []spotify.ID{"trackB", "trackD", "trackA"}
-	s3 := []spotify.ID{"trackE", "trackC", "trackF"}
+func TestMergePlaylistsDeduplicatesByISRC(t *testing.T) {
+	fake := spotifytest.NewServer(t)
+	fake.AddPlaylist(spotifytest.Playlist{Name: "One", Tracks: []spotifytest.Track{
+		{ID: "a-single", ISRC: "A"}, {ID: "b", ISRC: "B"},
+	}})
+	fake.AddPlaylist(spotifytest.Playlist{Name: "Two", Tracks: []spotifytest.Track{
+		{ID: "a-album", ISRC: "A"}, {ID: "c", ISRC: "C"},
+	}})
+	fake.AddPlaylist(spotifytest.Playlist{Name: "Three", Tracks: []spotifytest.Track{
+		{ID: "b", ISRC: "B"}, {ID: "d"},
+	}})
 
-	allPlaylists := [][]spotify.ID{s1, s2, s3}
-
-	seen := make(map[spotify.ID]bool)
-	var combined []spotify.ID
-
-	for _, list := range allPlaylists {
-		for _, id := range list {
-			if !seen[id] {
-				seen[id] = true
-				combined = append(combined, id)
-			}
-		}
+	result, err := sync.MergePlaylists(t.Context(), testLogger(), testConfig(), fake.Client(), sync.MergeConfig{
+		Sources:     []string{"One", "Two", "Three"},
+		TargetName:  "Merged",
+		Public:      true,
+		Deduplicate: true,
+	})
+	if err != nil {
+		t.Fatalf("MergePlaylists: %v", err)
 	}
 
-	expected := []spotify.ID{"trackA", "trackB", "trackC", "trackD", "trackE", "trackF"}
-
-	if len(combined) != len(expected) {
-		t.Fatalf("expected len %d, got %d", len(expected), len(combined))
+	if result.TotalTracks != 6 || result.UniqueTracks != 4 || result.DuplicatesSkipped != 2 {
+		t.Errorf("result = %+v, want total 6, unique 4, skipped 2", result)
 	}
 
-	for i, exp := range expected {
-		if combined[i] != exp {
-			t.Errorf("at index %d: expected %s, got %s", i, exp, combined[i])
-		}
+	merged, ok := fake.PlaylistByName("Merged")
+	if !ok {
+		t.Fatal("merged playlist was not created")
+	}
+	if merged.ID != result.TargetID {
+		t.Errorf("target id = %q, created playlist id = %q", result.TargetID, merged.ID)
+	}
+
+	want := []string{"a-single", "b", "c", "d"}
+	if got := fake.PlaylistTrackIDs(merged.ID); !slices.Equal(got, want) {
+		t.Errorf("merged tracks = %v, want %v", got, want)
+	}
+}
+
+func TestMergePlaylistsDryRunCreatesNothing(t *testing.T) {
+	fake := spotifytest.NewServer(t)
+	fake.AddPlaylist(spotifytest.Playlist{Name: "One", Tracks: []spotifytest.Track{{ID: "a"}}})
+	fake.AddPlaylist(spotifytest.Playlist{Name: "Two", Tracks: []spotifytest.Track{{ID: "a"}}})
+
+	result, err := sync.MergePlaylists(t.Context(), testLogger(), testConfig(), fake.Client(), sync.MergeConfig{
+		Sources:     []string{"One", "Two"},
+		TargetName:  "Merged",
+		Deduplicate: true,
+		DryRun:      true,
+	})
+	if err != nil {
+		t.Fatalf("MergePlaylists: %v", err)
+	}
+
+	if result.UniqueTracks != 1 || result.TargetID != "" {
+		t.Errorf("result = %+v, want 1 unique track and no target", result)
+	}
+	if _, ok := fake.PlaylistByName("Merged"); ok {
+		t.Error("dry run created the merged playlist")
 	}
 }

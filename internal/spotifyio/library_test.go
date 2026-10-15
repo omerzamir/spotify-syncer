@@ -1,7 +1,9 @@
-package spotifyio
+package spotifyio_test
 
 import (
 	"testing"
+
+	"spotify-syncer/internal/spotifyio"
 )
 
 func TestExtractPlaylistID(t *testing.T) {
@@ -63,7 +65,7 @@ func TestExtractPlaylistID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotID, gotBool := ExtractPlaylistID(tt.input)
+			gotID, gotBool := spotifyio.ExtractPlaylistID(tt.input)
 			if gotBool != tt.wantBool {
 				t.Errorf("ExtractPlaylistID(%q) gotBool = %v, want %v", tt.input, gotBool, tt.wantBool)
 			}

@@ -10,9 +10,10 @@ A Go CLI tool that syncs your liked/saved songs into playlists:
 - **Dynamic genre discovery**: Automatically creates genre playlists based on your library
 - **Aggressive caching**: Minimizes API calls by caching artist genres, playlist contents, and track metadata
 - **Rate limiting**: Built-in rate limiting with automatic retry on 429 responses
+- **Future-proof API usage**: Uses the endpoints Spotify introduced in February 2026 (`/playlists/{id}/items`, `/me/playlists`, `/me/library`) and falls back to the older ones per request when a new endpoint is unavailable, for example when reading a playlist you follow but do not own
 - **Reverse sync**: Add all songs from any playlist (by name, ID, or URL) into your Liked Songs library
 - **Playlist merge**: Merge two or more playlists into a new playlist with automatic track deduplication
-- **Fast mode**: Incremental sync support (coming soon)
+- **Fast mode**: Incremental sync that only adds songs liked since the last run (see [Sync modes](#sync-modes))
 
 ## Getting Started
 
@@ -39,7 +40,7 @@ Copy `config.example.yaml` to `config.yaml`:
 cp config.example.yaml config.yaml
 ```
 
-Edit `config.yaml` to adjust settings like playlist names, genre thresholds, etc.
+Edit `config.yaml` to adjust settings like playlist names, genre thresholds, etc. Unknown keys are rejected, so a typo fails loudly instead of being ignored. Credentials can also live in a `.env` file in the working directory; variables already set in the environment take precedence.
 
 ### 4. Build
 
@@ -70,6 +71,9 @@ Sync your liked songs:
 With options:
 
 ```bash
+# Only add songs liked since the last run (much faster on large libraries)
+./syncer run --mode=fast
+
 # Disable genre playlists
 ./syncer run --genres=false
 
@@ -79,6 +83,22 @@ With options:
 # Use a custom config file
 ./syncer run --config=/path/to/config.yaml
 ```
+
+### Sync modes
+
+| | `full` (default) | `fast` |
+|---|---|---|
+| Liked Songs fetched | All of them | Only those liked since the last successful run (usually one request) |
+| New likes | Added | Added |
+| Unliked songs | Removed from the mirror and genre playlists | **Kept** until the next full run |
+| Same song on single and album | Keeps the best release (playable, then most recently liked) and swaps it in if it changes | Skips a new release of a song that is already mirrored |
+| Artist genres | Re-fetched once older than `artist_genre_ttl` | Only fetched for artists never seen before |
+
+The syncer stores a checkpoint (the newest *liked at* time it has processed) in `state/checkpoints.json` and only advances it after a run succeeds, so a failed run is simply retried next time. Fast mode falls back to a full sync when it has no state yet (first run, or after deleting `state/`) and when `--force-refresh` is given.
+
+Recommended schedule: run `fast` often (for example every few hours) and `full` occasionally (for example weekly) to clean up unliked songs.
+
+The mirror playlist lists songs oldest-liked first, so new likes are appended at the end in both modes.
 
 ## Commands
 
@@ -94,18 +114,18 @@ Performs interactive OAuth login and saves the token for future runs.
 Runs the sync operation: fetches liked tracks, syncs mirror playlist, and optionally syncs genre playlists.
 
 **Flags:**
-- `--mode`: Sync mode - `full` or `fast` (default: `full`)
+- `--mode`: Sync mode - `full` or `fast` (default: `full`); see [Sync modes](#sync-modes)
 - `--genres`: Enable genre playlist sync (default: `true`)
 - `--force-refresh`: Force refresh of cached playlist contents (default: `false`)
 - `--reverse`: Reverse mode - add songs from playlist to liked songs (default: `false`)
-- `--playlist`: Target playlist name, ID, or URL for reverse mode (default: `mirror_playlist_name` from config)
+- `--playlist`: Playlist name, ID, or URL to reverse; required with `--reverse` (positional arguments are not accepted by `run`)
 - `--dry-run`: Dry-run mode for reverse sync (default: `false`)
 - `--config`: Path to config file (default: `config.yaml` in current directory)
 
 **Exit Codes:**
 - `0`: Success
 - `1`: Runtime error
-- `2`: Configuration or credential error
+- `2`: Usage, configuration or credential error
 
 **Output:**
 
@@ -114,6 +134,7 @@ The `run` command outputs a JSON summary to stdout:
 ```json
 {
   "success": true,
+  "mode": "full",
   "liked_total": 5000,
   "dedup_removed": 15,
   "mirror_added": 5,
@@ -121,18 +142,29 @@ The `run` command outputs a JSON summary to stdout:
   "buckets_created": 8,
   "buckets_removed": 0,
   "duration_sec": 45.2,
-  "duplicate_ids": ["spotify:track:abc123", "spotify:track:def456"]
+  "duplicate_ids": ["abc123", "def456"]
 }
 ```
 
+`mode` is the mode that actually ran (`full` when fast mode fell back). Fast runs also report `new_tracks`, the number of liked songs not seen before; `liked_total` is then the number of liked songs known from previous runs. Bucket counts are omitted when genre sync is disabled.
+
 ### `syncer reverse`
 
-Adds all songs from a playlist (by name, ID, or URL) into your Liked Songs library. Tracks that are already liked are skipped to preserve their original added date.
+Adds all songs from a playlist (by name, ID, or URL) into your Liked Songs library. The playlist is required and is given either as a single positional argument or with `--playlist`; there is no default. To reverse your mirror playlist, name it explicitly (`syncer reverse "Public Liked Songs"`). Tracks that are already liked are skipped to preserve their original added date. Matching uses ISRC codes, so a song you already liked as a single is not liked again from its album, and a song appearing twice in the playlist is only liked once.
+
+After the first `syncer run`, reverse only fetches the songs liked since that run instead of your whole library.
+
+**Usage:**
+
+```bash
+syncer reverse <playlist> [flags]
+syncer reverse --playlist <playlist> [flags]
+```
 
 **Flags:**
-- `--playlist`: Playlist name, Spotify ID, or Spotify URL (default: `mirror_playlist_name` from config)
+- `--playlist`: Playlist name, Spotify ID, or Spotify URL; alternative to the positional argument (required unless given positionally)
 - `--dry-run`: Preview tracks that would be added without making changes (default: `false`)
-- `--batch-size`: Batch size for saving tracks (1-50, default: `50`)
+- `--batch-size`: Batch size for saving tracks (1-40, default: `40`)
 - `--config`: Path to config file (default: `config.yaml` in current directory)
 
 **Output:**
@@ -143,6 +175,7 @@ Adds all songs from a playlist (by name, ID, or URL) into your Liked Songs libra
   "playlist_name": "Public Liked Songs",
   "playlist_id": "37i9dQZF1DXcBWIGoYBM5M",
   "total_tracks": 150,
+  "duplicates_skipped": 2,
   "already_liked": 120,
   "newly_added": 30,
   "dry_run": false,
@@ -152,7 +185,7 @@ Adds all songs from a playlist (by name, ID, or URL) into your Liked Songs libra
 
 ### `syncer merge`
 
-Merges tracks from two or more source playlists into a newly created playlist. Source playlists can be passed as playlist names, Spotify IDs, Spotify URIs, or Spotify URLs. Tracks are automatically deduplicated across all playlists (unless disabled with `--dedup=false`).
+Merges tracks from two or more source playlists into a newly created playlist. Source playlists can be passed as playlist names, Spotify IDs, Spotify URIs, or Spotify URLs. Tracks are automatically deduplicated across all playlists (unless disabled with `--dedup=false`), including different releases of the same song (matched by ISRC). The first occurrence wins and playlist order is preserved.
 
 **Usage:**
 
@@ -165,7 +198,7 @@ syncer merge <source1> <source2> [source3...] --name "Merged Playlist"
 - `--public`: Make the new playlist public (default: `true`)
 - `--dedup`: Deduplicate tracks across all playlists (default: `true`)
 - `--dry-run`: Preview tracks that would be merged without creating the playlist (default: `false`)
-- `--source`: Specify a source playlist (can be passed multiple times as an alternative to positional arguments)
+- `--source`: Specify a source playlist (repeatable or comma-separated; combined with any positional arguments)
 - `--config`: Path to config file (default: `config.yaml` in current directory)
 
 **Output:**
@@ -210,7 +243,11 @@ Automate syncer runs using cron on macOS. The recommended approach is to use the
 
 3. **Save and exit** (in `vi`, press `Esc`, type `:wq`, then press `Enter`)
 
-The syncer will now run automatically every two days at 11:00 AM in fast (incremental) mode.
+The syncer will now run automatically every two days at 11:00 AM in fast (incremental) mode. Fast mode never removes songs you unliked, so also schedule an occasional full run, for example every Sunday at 4:00 AM:
+
+```bash
+0 4 * * 0 cd /path/to/spotify-syncer && ./bin/syncer run --mode=full >> logs/syncer-cron.log 2>&1
+```
 
 ### Understanding Cron Syntax
 

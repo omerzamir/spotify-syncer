@@ -5,9 +5,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 
-	mapset "github.com/deckarep/golang-set/v2"
-	"github.com/zmb3/spotify/v2"
+	"github.com/omerzamir/spotify/v2"
 
 	"spotify-syncer/internal/cache"
 	"spotify-syncer/internal/config"
@@ -53,7 +54,9 @@ func Genres(
 		BucketsSynced: len(buckets),
 	}
 
-	for bucketName, desiredTracks := range buckets {
+	for _, bucketName := range slices.Sorted(maps.Keys(buckets)) {
+		desiredTracks := buckets[bucketName]
+
 		bucketResult, syncErr := syncBucket(
 			ctx,
 			logger,
@@ -126,7 +129,7 @@ func syncBucket(
 	forceRefresh bool,
 ) (bucketSyncResult, error) {
 	playlistName := cfg.Genre.BucketPlaylistPrefix + bucketName
-	playlistID, err := findOrCreatePlaylist(
+	playlistID, cachedID, err := findOrCreatePlaylist(
 		ctx,
 		logger,
 		client,
@@ -136,6 +139,18 @@ func syncBucket(
 	)
 	if err != nil {
 		return bucketSyncResult{}, fmt.Errorf("finding or creating playlist: %w", err)
+	}
+
+	if !cachedID {
+		// The playlist was recreated or re-resolved by name, so the cached
+		// contents describe a different playlist.
+		logger.InfoContext(ctx, "bucket playlist is not the cached one, discarding cached bucket tracks",
+			"bucket", bucketName,
+			"playlist_id", playlistID)
+		delete(cachedBuckets, bucketName)
+		if evictErr := store.EvictBucketTracks(bucketName); evictErr != nil {
+			return bucketSyncResult{}, fmt.Errorf("evicting stale bucket tracks cache: %w", evictErr)
+		}
 	}
 
 	syncCfg := syncConfig{
@@ -178,14 +193,9 @@ func findStaleBuckets(
 	currentBuckets map[string][]spotify.ID,
 	cachedBuckets map[string][]string,
 ) []string {
-	currentSet := mapset.NewSet[string]()
-	for bucketName := range currentBuckets {
-		currentSet.Add(bucketName)
-	}
-
 	var stale []string
-	for bucketName := range cachedBuckets {
-		if !currentSet.Contains(bucketName) {
+	for _, bucketName := range slices.Sorted(maps.Keys(cachedBuckets)) {
+		if _, ok := currentBuckets[bucketName]; !ok {
 			stale = append(stale, bucketName)
 		}
 	}
@@ -248,7 +258,7 @@ func cleanupStaleBucket(
 	}
 
 	if len(currentTracks) > 0 {
-		err = spotifyio.BatchRemoveTracks(
+		_, err = spotifyio.BatchRemoveTracks(
 			ctx,
 			logger,
 			client,
