@@ -1,6 +1,7 @@
 package sync_test
 
 import (
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -154,5 +155,19 @@ func TestReverseFromFollowedPlaylistFallsBackToLegacyEndpoint(t *testing.T) {
 	if !slices.Contains(requests, "GET /playlists/pl1/items") ||
 		!slices.Contains(requests, "GET /playlists/pl1/tracks") {
 		t.Errorf("requests = %v, want a 403 on /items followed by the legacy /tracks read", requests)
+	}
+}
+
+func TestReverseRequiresSourcePlaylist(t *testing.T) {
+	fake := spotifytest.NewServer(t)
+
+	_, err := sync.Reverse(t.Context(), testLogger(), testConfig(), fake.Client(), testStore(t),
+		sync.ReverseConfig{BatchSize: 40})
+	if !errors.Is(err, sync.ErrNoReverseSource) {
+		t.Fatalf("Reverse error = %v, want ErrNoReverseSource", err)
+	}
+
+	if requests := fake.Requests(); len(requests) != 0 {
+		t.Errorf("requests = %v, want none", requests)
 	}
 }

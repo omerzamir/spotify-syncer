@@ -3,6 +3,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -15,8 +16,14 @@ import (
 	"spotify-syncer/internal/spotifyio"
 )
 
+// ErrNoReverseSource is returned by Reverse when no source playlist is named.
+// Reversing the mirror playlist is allowed, but it must be named explicitly.
+var ErrNoReverseSource = errors.New("reverse needs a source playlist")
+
 // ReverseConfig holds parameters for importing songs from a playlist into Liked Songs.
 type ReverseConfig struct {
+	// PlaylistIdentifier is the source playlist name, ID, or URL. It is
+	// required: there is no implicit default to the mirror playlist.
 	PlaylistIdentifier string
 	BatchSize          int
 	DryRun             bool
@@ -35,7 +42,8 @@ type ReverseResult struct {
 }
 
 // Reverse syncs songs from a playlist (by name, ID, or URL) into the user's Liked Songs library.
-// If PlaylistIdentifier is empty, it defaults to the configured mirror playlist name.
+// It returns ErrNoReverseSource if PlaylistIdentifier is empty; the mirror
+// playlist is only reversed when it is named explicitly.
 //
 // Playlist tracks are deduplicated by ISRC first, so two releases of the same
 // recording are liked once. A track counts as already liked when it, or any
@@ -44,7 +52,7 @@ type ReverseResult struct {
 func Reverse(
 	ctx context.Context,
 	logger *slog.Logger,
-	cfg config.Config,
+	_ config.Config,
 	client *spotify.Client,
 	store *cache.Store,
 	reverseCfg ReverseConfig,
@@ -53,7 +61,7 @@ func Reverse(
 
 	targetIdentifier := reverseCfg.PlaylistIdentifier
 	if targetIdentifier == "" {
-		targetIdentifier = cfg.Sync.MirrorPlaylistName
+		return ReverseResult{}, ErrNoReverseSource
 	}
 
 	logger.InfoContext(ctx, "resolving target playlist for reverse sync",

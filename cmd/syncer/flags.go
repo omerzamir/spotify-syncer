@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -24,8 +25,16 @@ func newFlagSet(name, synopsis string, stderr io.Writer, configPath *string) *fl
 
 // parseInterspersed parses fs from args, allowing flags to appear before,
 // between and after positional arguments, and returns the positional
-// arguments in order. Everything after a "--" argument is positional.
+// arguments in order. Args are split at the first literal "--" token before
+// parsing: everything after it is positional verbatim, so "--" can never be
+// consumed as a flag value.
 func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var verbatim []string
+
+	if i := slices.Index(args, "--"); i >= 0 {
+		args, verbatim = args[:i], args[i+1:]
+	}
+
 	var positional []string
 
 	for {
@@ -36,14 +45,9 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 			return nil, fmt.Errorf("%w: %w", errUsage, err)
 		}
 
-		consumed := len(args) - fs.NArg()
-		if consumed > 0 && args[consumed-1] == "--" {
-			return append(positional, fs.Args()...), nil
-		}
-
 		args = fs.Args()
 		if len(args) == 0 {
-			return positional, nil
+			return append(positional, verbatim...), nil
 		}
 
 		positional = append(positional, args[0])

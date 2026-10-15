@@ -118,7 +118,7 @@ Runs the sync operation: fetches liked tracks, syncs mirror playlist, and option
 - `--genres`: Enable genre playlist sync (default: `true`)
 - `--force-refresh`: Force refresh of cached playlist contents (default: `false`)
 - `--reverse`: Reverse mode - add songs from playlist to liked songs (default: `false`)
-- `--playlist`: Target playlist name, ID, or URL for reverse mode (default: `mirror_playlist_name` from config)
+- `--playlist`: Playlist name, ID, or URL to reverse; required with `--reverse` (positional arguments are not accepted by `run`)
 - `--dry-run`: Dry-run mode for reverse sync (default: `false`)
 - `--config`: Path to config file (default: `config.yaml` in current directory)
 
@@ -150,12 +150,19 @@ The `run` command outputs a JSON summary to stdout:
 
 ### `syncer reverse`
 
-Adds all songs from a playlist (by name, ID, or URL) into your Liked Songs library. Tracks that are already liked are skipped to preserve their original added date. Matching uses ISRC codes, so a song you already liked as a single is not liked again from its album, and a song appearing twice in the playlist is only liked once.
+Adds all songs from a playlist (by name, ID, or URL) into your Liked Songs library. The playlist is required and is given either as a single positional argument or with `--playlist`; there is no default. To reverse your mirror playlist, name it explicitly (`syncer reverse "Public Liked Songs"`). Tracks that are already liked are skipped to preserve their original added date. Matching uses ISRC codes, so a song you already liked as a single is not liked again from its album, and a song appearing twice in the playlist is only liked once.
 
 After the first `syncer run`, reverse only fetches the songs liked since that run instead of your whole library.
 
+**Usage:**
+
+```bash
+syncer reverse <playlist> [flags]
+syncer reverse --playlist <playlist> [flags]
+```
+
 **Flags:**
-- `--playlist`: Playlist name, Spotify ID, or Spotify URL (default: `mirror_playlist_name` from config)
+- `--playlist`: Playlist name, Spotify ID, or Spotify URL; alternative to the positional argument (required unless given positionally)
 - `--dry-run`: Preview tracks that would be added without making changes (default: `false`)
 - `--batch-size`: Batch size for saving tracks (1-40, default: `40`)
 - `--config`: Path to config file (default: `config.yaml` in current directory)
@@ -191,7 +198,7 @@ syncer merge <source1> <source2> [source3...] --name "Merged Playlist"
 - `--public`: Make the new playlist public (default: `true`)
 - `--dedup`: Deduplicate tracks across all playlists (default: `true`)
 - `--dry-run`: Preview tracks that would be merged without creating the playlist (default: `false`)
-- `--source`: Specify a source playlist (repeatable or comma-separated, as an alternative to positional arguments)
+- `--source`: Specify a source playlist (repeatable or comma-separated; combined with any positional arguments)
 - `--config`: Path to config file (default: `config.yaml` in current directory)
 
 **Output:**

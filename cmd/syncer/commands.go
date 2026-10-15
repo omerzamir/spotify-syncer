@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"spotify-syncer/internal/auth"
 	"spotify-syncer/internal/spotifyio"
@@ -15,6 +16,14 @@ const (
 	// defaultLibraryBatchSize is Spotify's maximum number of tracks per
 	// save-to-library request.
 	defaultLibraryBatchSize = spotifyio.MaxLibraryBatchSize
+
+	// reverseNeedsPlaylistMsg is the usage error for a reverse without a source.
+	reverseNeedsPlaylistMsg = "reverse needs a playlist: syncer reverse <playlist> or --playlist <playlist> " +
+		"(to reverse the mirror playlist, name it explicitly)"
+
+	// runReverseNeedsPlaylistMsg is the usage error for run --reverse without a source.
+	runReverseNeedsPlaylistMsg = "run --reverse needs a playlist: --reverse --playlist <playlist> " +
+		"(to reverse the mirror playlist, name it explicitly)"
 )
 
 // authCommand performs the interactive OAuth login and saves the token.
@@ -67,21 +76,30 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		"Playlist name, ID, or URL for reverse mode (default: mirror_playlist_name from config)")
 	fs.BoolVar(&dryRun, "dry-run", false, "Dry run mode (for reverse sync)")
 
-	if _, err := parseInterspersed(fs, args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return err
 	}
 
-	if reverse {
-		return runReverse(ctx, configPath, sync.ReverseConfig{
-			PlaylistIdentifier: playlist,
-			BatchSize:          defaultLibraryBatchSize,
-			DryRun:             dryRun,
-		}, stdout, stderr)
+	if len(positional) > 0 {
+		return fmt.Errorf("%w: run takes no positional arguments, got %q", errUsage, positional)
 	}
 
 	runMode, err := sync.ParseMode(mode)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+
+	if reverse {
+		if playlist == "" {
+			return fmt.Errorf("%w: %s", errUsage, runReverseNeedsPlaylistMsg)
+		}
+
+		return runReverse(ctx, configPath, sync.ReverseConfig{
+			PlaylistIdentifier: playlist,
+			BatchSize:          defaultLibraryBatchSize,
+			DryRun:             dryRun,
+		}, stdout, stderr)
 	}
 
 	s, err := openSession(ctx, configPath, stderr)
@@ -110,27 +128,55 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	return nil
 }
 
-// reverseCommand adds every song from a playlist to Liked Songs.
+// reverseCommand adds every song from a playlist to Liked Songs. The playlist
+// is given either as --playlist or as exactly one positional argument.
 func reverseCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	var (
 		configPath string
 		reverseCfg sync.ReverseConfig
 	)
 
-	fs := newFlagSet("reverse", "reverse [flags]", stderr, &configPath)
+	fs := newFlagSet("reverse", "reverse <playlist> [flags]", stderr, &configPath)
 	fs.StringVar(&reverseCfg.PlaylistIdentifier, "playlist", "",
-		"Playlist name, ID, or URL (default: mirror_playlist_name from config)")
+		"Playlist name, ID, or URL (alternative to the positional argument)")
 	fs.BoolVar(&reverseCfg.DryRun, "dry-run", false,
 		"Preview tracks that would be added without actually adding them")
 	fs.IntVar(&reverseCfg.BatchSize, "batch-size", defaultLibraryBatchSize, "Batch size for saving tracks (max 40)")
 
-	if _, err := parseInterspersed(fs, args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+
+	reverseCfg.PlaylistIdentifier, err = reversePlaylist(reverseCfg.PlaylistIdentifier, positional)
+	if err != nil {
 		return err
 	}
 
 	return runReverse(ctx, configPath, reverseCfg, stdout, stderr)
 }
 
+// reversePlaylist picks the reverse source from the --playlist value and the
+// positional arguments. Exactly one playlist may be named, in either form; both
+// forms are accepted together only when they agree.
+func reversePlaylist(flagged string, positional []string) (string, error) {
+	switch {
+	case len(positional) > 1:
+		return "", fmt.Errorf("%w: reverse takes exactly one playlist, got %d arguments: %q",
+			errUsage, len(positional), positional)
+	case len(positional) == 1 && flagged != "" && positional[0] != flagged:
+		return "", fmt.Errorf("%w: conflicting playlists: argument %q and --playlist %q",
+			errUsage, positional[0], flagged)
+	case len(positional) == 1:
+		return positional[0], nil
+	case flagged != "":
+		return flagged, nil
+	default:
+		return "", fmt.Errorf("%w: %s", errUsage, reverseNeedsPlaylistMsg)
+	}
+}
+
+// runReverse opens a session and adds the playlist named by reverseCfg to Liked Songs.
 func runReverse(ctx context.Context, configPath string, reverseCfg sync.ReverseConfig, stdout, stderr io.Writer) error {
 	s, err := openSession(ctx, configPath, stderr)
 	if err != nil {
@@ -144,6 +190,12 @@ func runReverse(ctx context.Context, configPath string, reverseCfg sync.ReverseC
 	}
 
 	return writeSummary(stdout, reverseSummary{Success: true, ReverseResult: result})
+}
+
+// mergeSources combines the positional source playlists with the --source
+// values, positional first, preserving order.
+func mergeSources(positional, flagged []string) []string {
+	return slices.Concat(positional, flagged)
 }
 
 // mergeCommand merges two or more playlists into a new playlist.
@@ -168,10 +220,7 @@ func mergeCommand(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return err
 	}
 
-	mergeCfg.Sources = positional
-	if len(mergeCfg.Sources) == 0 {
-		mergeCfg.Sources = sources
-	}
+	mergeCfg.Sources = mergeSources(positional, sources)
 
 	if len(mergeCfg.Sources) < sync.MinMergeSources {
 		return fmt.Errorf("%w: at least two source playlists are required: "+
