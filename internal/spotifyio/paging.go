@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/zmb3/spotify/v2"
 )
@@ -35,7 +36,52 @@ func FetchAllLikedTracks(
 	logger *slog.Logger,
 	client *spotify.Client,
 ) ([]LikedTrackData, error) {
-	fields := "items(track(id,artists(id),external_ids(isrc),is_playable)),added_at,next,total"
+	tracks, err := fetchLikedTracks(ctx, logger, client, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+
+	logger.InfoContext(ctx, "fetched all liked tracks",
+		"total", len(tracks))
+
+	return tracks, nil
+}
+
+// FetchLikedTracksSince pages through the user's liked tracks newest-first and
+// stops at the first track added strictly before since. Tracks added exactly
+// at since are included, because bulk saves share one timestamp and some of
+// them may not have been seen yet. A zero since fetches everything.
+//
+// Spotify does not document the sort order of GET /me/tracks; it has always
+// been newest-first. Callers must treat the result as a best-effort delta and
+// rely on a full fetch for reconciliation.
+func FetchLikedTracksSince(
+	ctx context.Context,
+	logger *slog.Logger,
+	client *spotify.Client,
+	since time.Time,
+) ([]LikedTrackData, error) {
+	tracks, err := fetchLikedTracks(ctx, logger, client, since)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.InfoContext(ctx, "fetched liked tracks since checkpoint",
+		"since", since,
+		"total", len(tracks))
+
+	return tracks, nil
+}
+
+// fetchLikedTracks pages through liked tracks newest-first, stopping at the
+// first track added before since (never stopping when since is zero).
+func fetchLikedTracks(
+	ctx context.Context,
+	logger *slog.Logger,
+	client *spotify.Client,
+	since time.Time,
+) ([]LikedTrackData, error) {
+	fields := "items(added_at,track(id,artists(id),external_ids(isrc),is_playable)),next,total"
 	page, err := client.CurrentUsersTracks(
 		ctx,
 		spotify.Limit(likedTracksPageSize),
@@ -49,6 +95,10 @@ func FetchAllLikedTracks(
 
 	for {
 		for _, savedTrack := range page.Tracks {
+			if !since.IsZero() && addedBefore(ctx, logger, savedTrack.AddedAt, since) {
+				return allTracks, nil
+			}
+
 			if savedTrack.ID == "" {
 				logger.WarnContext(ctx, "skipping empty track in liked songs")
 				continue
@@ -59,17 +109,12 @@ func FetchAllLikedTracks(
 				artistIDs = append(artistIDs, artist.ID)
 			}
 
-			isrc := ""
-			if savedTrack.ExternalIDs != nil {
-				isrc = savedTrack.ExternalIDs["isrc"]
-			}
-
 			isPlayable := savedTrack.IsPlayable == nil || *savedTrack.IsPlayable
 
 			allTracks = append(allTracks, LikedTrackData{
 				TrackID:    savedTrack.ID,
 				ArtistIDs:  artistIDs,
-				ISRC:       isrc,
+				ISRC:       isrcOf(savedTrack.ExternalIDs),
 				AddedAt:    savedTrack.AddedAt,
 				IsPlayable: isPlayable,
 			})
@@ -84,30 +129,59 @@ func FetchAllLikedTracks(
 		}
 	}
 
-	logger.InfoContext(ctx, "fetched all liked tracks",
-		"total", len(allTracks))
-
 	return allTracks, nil
 }
 
-// FetchPlaylistTrackIDs paginates through a playlist's items and returns
-// all track IDs. Skips episodes and other non-track items.
-func FetchPlaylistTrackIDs(
+// addedBefore reports whether the RFC3339 addedAt timestamp is strictly before
+// since. Unparseable timestamps never stop paging.
+func addedBefore(ctx context.Context, logger *slog.Logger, addedAt string, since time.Time) bool {
+	t, err := time.Parse(time.RFC3339, addedAt)
+	if err != nil {
+		logger.WarnContext(ctx, "unparseable added_at on liked track",
+			"added_at", addedAt,
+			"error", err)
+		return false
+	}
+
+	return t.Before(since)
+}
+
+// isrcOf returns the ISRC from a track's external IDs, or "" when absent.
+func isrcOf(externalIDs map[string]string) string {
+	if externalIDs == nil {
+		return ""
+	}
+	return externalIDs["isrc"]
+}
+
+// PlaylistTrackData holds the identity of a track in a playlist: its Spotify
+// ID and, when Spotify returns one, its ISRC.
+type PlaylistTrackData struct {
+	TrackID spotify.ID
+	ISRC    string
+}
+
+// FetchPlaylistTracks paginates through a playlist's items and returns each
+// track's ID and ISRC in playlist order. Skips episodes, unavailable tracks and
+// local files (which have no Spotify ID). Uses Fields() so only the ID, type
+// and ISRC of each item are transferred.
+func FetchPlaylistTracks(
 	ctx context.Context,
 	logger *slog.Logger,
 	client *spotify.Client,
 	playlistID spotify.ID,
-) ([]spotify.ID, error) {
+) ([]PlaylistTrackData, error) {
 	page, err := client.GetPlaylistItems(
 		ctx,
 		playlistID,
 		spotify.Limit(playlistItemsPageSize),
+		spotify.Fields("items(track(type,id,external_ids(isrc))),next,total"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("fetching first page of playlist items: %w", err)
 	}
 
-	var trackIDs []spotify.ID
+	var tracks []PlaylistTrackData
 
 	for {
 		for _, item := range page.Items {
@@ -123,7 +197,16 @@ func FetchPlaylistTrackIDs(
 				continue
 			}
 
-			trackIDs = append(trackIDs, item.Track.Track.ID)
+			if item.Track.Track.ID == "" {
+				logger.DebugContext(ctx, "skipping local file in playlist",
+					"playlist_id", playlistID)
+				continue
+			}
+
+			tracks = append(tracks, PlaylistTrackData{
+				TrackID: item.Track.Track.ID,
+				ISRC:    isrcOf(item.Track.Track.ExternalIDs),
+			})
 		}
 
 		err = client.NextPage(ctx, page)
@@ -135,9 +218,30 @@ func FetchPlaylistTrackIDs(
 		}
 	}
 
-	logger.InfoContext(ctx, "fetched playlist track IDs",
+	logger.InfoContext(ctx, "fetched playlist tracks",
 		"playlist_id", playlistID,
-		"total", len(trackIDs))
+		"total", len(tracks))
+
+	return tracks, nil
+}
+
+// FetchPlaylistTrackIDs paginates through a playlist's items and returns
+// all track IDs. Skips episodes and other non-track items.
+func FetchPlaylistTrackIDs(
+	ctx context.Context,
+	logger *slog.Logger,
+	client *spotify.Client,
+	playlistID spotify.ID,
+) ([]spotify.ID, error) {
+	tracks, err := FetchPlaylistTracks(ctx, logger, client, playlistID)
+	if err != nil {
+		return nil, err
+	}
+
+	trackIDs := make([]spotify.ID, len(tracks))
+	for i, track := range tracks {
+		trackIDs[i] = track.TrackID
+	}
 
 	return trackIDs, nil
 }

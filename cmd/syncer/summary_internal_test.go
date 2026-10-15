@@ -52,7 +52,7 @@ func TestReverseSummaryJSONFlattensResult(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	want := `{"playlist_name":"p","playlist_id":"id","total_tracks":2,"already_liked":0,"newly_added":1,"dry_run":false,"duration_sec":0,"success":true}`
+	want := `{"playlist_name":"p","playlist_id":"id","total_tracks":2,"duplicates_skipped":0,"already_liked":0,"newly_added":1,"dry_run":false,"duration_sec":0,"success":true}`
 	if string(got) != want {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
