@@ -45,15 +45,22 @@ type Checkpoint struct {
 
 // RunMetrics holds the summary statistics of a sync run.
 type RunMetrics struct {
-	StartedAt      time.Time `json:"started_at"`
-	FinishedAt     time.Time `json:"finished_at"`
-	LikedTotal     int       `json:"liked_total"`
-	DedupRemoved   int       `json:"dedup_removed"`
-	MirrorAdded    int       `json:"mirror_added"`
-	MirrorRemoved  int       `json:"mirror_removed"`
-	BucketsCreated int       `json:"buckets_created"`
-	BucketsRemoved int       `json:"buckets_removed"`
-	DuplicateIDs   []string  `json:"duplicate_ids,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	// Mode is the mode that actually ran: "full" or "fast". A fast run that
+	// fell back to a full sync reports "full".
+	Mode string `json:"mode"`
+	// LikedTotal is the number of liked tracks fetched in full mode, or the
+	// number known from the ISRC cache in fast mode.
+	LikedTotal int `json:"liked_total"`
+	// NewTracks is the number of liked tracks a fast run had not seen before.
+	NewTracks      int      `json:"new_tracks"`
+	DedupRemoved   int      `json:"dedup_removed"`
+	MirrorAdded    int      `json:"mirror_added"`
+	MirrorRemoved  int      `json:"mirror_removed"`
+	BucketsCreated int      `json:"buckets_created"`
+	BucketsRemoved int      `json:"buckets_removed"`
+	DuplicateIDs   []string `json:"duplicate_ids,omitempty"`
 }
 
 // Store manages atomic reading and writing of JSON state files. It is not

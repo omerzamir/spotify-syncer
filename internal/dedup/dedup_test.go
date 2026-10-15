@@ -110,3 +110,27 @@ func newStore(t *testing.T) *cache.Store {
 	}
 	return store
 }
+
+func TestDeduplicateTracksPreservesInputOrder(t *testing.T) {
+	tracks := []spotifyio.LikedTrackData{
+		{TrackID: "n1", ISRC: "A", AddedAt: "2026-03-01T00:00:00Z", IsPlayable: true},
+		{TrackID: "n2", AddedAt: "2026-02-01T00:00:00Z", IsPlayable: true},
+		{TrackID: "n3", ISRC: "B", AddedAt: "2026-01-03T00:00:00Z", IsPlayable: true},
+		{TrackID: "old-a", ISRC: "A", AddedAt: "2026-01-02T00:00:00Z", IsPlayable: true},
+		{TrackID: "n5", ISRC: "C", AddedAt: "2026-01-01T00:00:00Z", IsPlayable: true},
+	}
+
+	for range 20 { // map iteration order must not leak into the result
+		result, err := dedup.DeduplicateTracks(t.Context(), slog.New(slog.DiscardHandler), newStore(t), tracks)
+		if err != nil {
+			t.Fatalf("DeduplicateTracks: %v", err)
+		}
+
+		if want := []spotify.ID{"n1", "n2", "n3", "n5"}; !slices.Equal(result.RepresentativeTracks, want) {
+			t.Fatalf("RepresentativeTracks = %v, want %v", result.RepresentativeTracks, want)
+		}
+		if want := []spotify.ID{"old-a"}; !slices.Equal(result.DuplicateIDs, want) {
+			t.Fatalf("DuplicateIDs = %v, want %v", result.DuplicateIDs, want)
+		}
+	}
+}

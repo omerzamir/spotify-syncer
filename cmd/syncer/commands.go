@@ -11,9 +11,6 @@ import (
 )
 
 const (
-	modeFull = "full"
-	modeFast = "fast"
-
 	// defaultLibraryBatchSize is Spotify's maximum number of tracks per
 	// save-to-library request.
 	defaultLibraryBatchSize = 50
@@ -60,7 +57,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	)
 
 	fs := newFlagSet("run", "run [flags]", stderr, &configPath)
-	fs.StringVar(&mode, "mode", modeFull, "Sync mode: full or fast")
+	fs.StringVar(&mode, "mode", string(sync.ModeFull),
+		"Sync mode: full (reconcile everything) or fast (only add tracks liked since the last run)")
 	fs.BoolVar(&enableGenres, "genres", true, "Enable genre playlist sync")
 	fs.BoolVar(&forceRefresh, "force-refresh", false, "Force refresh of cached playlist contents")
 	fs.BoolVar(&reverse, "reverse", false, "Reverse mode: add songs from playlist to liked songs")
@@ -80,8 +78,9 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		}, stdout, stderr)
 	}
 
-	if mode != modeFull && mode != modeFast {
-		return fmt.Errorf("%w: invalid mode %q (must be %q or %q)", errUsage, mode, modeFull, modeFast)
+	runMode, err := sync.ParseMode(mode)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 
 	s, err := openSession(ctx, configPath, stderr)
@@ -90,11 +89,11 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 	defer s.close(ctx)
 
-	if mode == modeFast {
-		s.logger.InfoContext(ctx, "fast mode not yet implemented, falling back to full mode")
-	}
-
-	result, err := sync.Run(ctx, s.logger, s.cfg, s.client, s.store, enableGenres, forceRefresh)
+	result, err := sync.Run(ctx, s.logger, s.cfg, s.client, s.store, sync.RunOptions{
+		Mode:         runMode,
+		EnableGenres: enableGenres,
+		ForceRefresh: forceRefresh,
+	})
 	if err != nil {
 		return fmt.Errorf("sync run failed: %w", err)
 	}

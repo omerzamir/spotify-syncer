@@ -9,11 +9,13 @@ import (
 )
 
 // syncSummary is the JSON summary printed to stdout after a sync run. Bucket
-// counts are pointers so they are omitted when genre sync is disabled but
-// still printed as 0 when it is enabled.
+// counts and new_tracks are pointers so they are omitted when they do not
+// apply (genre sync disabled, full mode) but still printed as 0 when they do.
 type syncSummary struct {
 	Success        bool     `json:"success"`
+	Mode           string   `json:"mode"`
 	LikedTotal     int      `json:"liked_total"`
+	NewTracks      *int     `json:"new_tracks,omitempty"`
 	DedupRemoved   int      `json:"dedup_removed"`
 	MirrorAdded    int      `json:"mirror_added"`
 	MirrorRemoved  int      `json:"mirror_removed"`
@@ -29,12 +31,17 @@ func newSyncSummary(result sync.RunResult, genresEnabled bool) syncSummary {
 
 	summary := syncSummary{
 		Success:       result.Success,
+		Mode:          m.Mode,
 		LikedTotal:    m.LikedTotal,
 		DedupRemoved:  m.DedupRemoved,
 		MirrorAdded:   m.MirrorAdded,
 		MirrorRemoved: m.MirrorRemoved,
 		DurationSec:   m.FinishedAt.Sub(m.StartedAt).Seconds(),
 		DuplicateIDs:  m.DuplicateIDs,
+	}
+
+	if m.Mode == string(sync.ModeFast) {
+		summary.NewTracks = new(m.NewTracks)
 	}
 
 	if genresEnabled {

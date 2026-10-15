@@ -25,58 +25,51 @@ type DeduplicationResult struct {
 // DeduplicateTracks groups liked tracks by ISRC code and selects a single
 // representative track for each ISRC group. Tracks without ISRC codes are
 // always kept. The selection prefers playable tracks, then most recently
-// added tracks. Updates the ISRC cache with all track-to-ISRC mappings.
+// added tracks. Representatives and duplicates keep the order of tracks.
+// Replaces the ISRC cache with all track-to-ISRC mappings, so the cache lists
+// every liked track.
 func DeduplicateTracks(
 	ctx context.Context,
 	logger *slog.Logger,
 	store *cache.Store,
 	tracks []spotifyio.LikedTrackData,
 ) (DeduplicationResult, error) {
-	isrcMap := make(map[string]string)
+	isrcMap := make(map[string]string, len(tracks))
 	isrcGroups := make(map[string][]spotifyio.LikedTrackData)
 
 	for _, track := range tracks {
 		isrcMap[string(track.TrackID)] = track.ISRC
 
-		if track.ISRC == "" {
-			continue
+		if track.ISRC != "" {
+			isrcGroups[track.ISRC] = append(isrcGroups[track.ISRC], track)
 		}
-
-		isrcGroups[track.ISRC] = append(isrcGroups[track.ISRC], track)
 	}
 
 	if err := store.SaveTrackISRC(isrcMap); err != nil {
 		return DeduplicationResult{}, fmt.Errorf("saving ISRC cache: %w", err)
 	}
 
-	var representativeTracks []spotify.ID
-	var duplicateIDs []spotify.ID
-
+	representatives := make(map[string]spotify.ID, len(isrcGroups))
 	for isrc, group := range isrcGroups {
-		if len(group) == 1 {
-			representativeTracks = append(representativeTracks, group[0].TrackID)
-			continue
-		}
-
 		representative := selectRepresentative(group)
-		representativeTracks = append(representativeTracks, representative.TrackID)
+		representatives[isrc] = representative.TrackID
 
-		for _, track := range group {
-			if track.TrackID != representative.TrackID {
-				duplicateIDs = append(duplicateIDs, track.TrackID)
-			}
+		if len(group) > 1 {
+			logger.DebugContext(ctx, "deduplicated ISRC group",
+				"isrc", isrc,
+				"total_tracks", len(group),
+				"representative", representative.TrackID,
+				"duplicates", len(group)-1)
 		}
-
-		logger.DebugContext(ctx, "deduplicated ISRC group",
-			"isrc", isrc,
-			"total_tracks", len(group),
-			"representative", representative.TrackID,
-			"duplicates", len(group)-1)
 	}
 
+	var representativeTracks, duplicateIDs []spotify.ID
+
 	for _, track := range tracks {
-		if track.ISRC == "" {
+		if track.ISRC == "" || representatives[track.ISRC] == track.TrackID {
 			representativeTracks = append(representativeTracks, track.TrackID)
+		} else {
+			duplicateIDs = append(duplicateIDs, track.TrackID)
 		}
 	}
 

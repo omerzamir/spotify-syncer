@@ -3,36 +3,58 @@ package main
 import (
 	"encoding/json"
 	"testing"
+	"time"
+
+	"spotify-syncer/internal/cache"
+	"spotify-syncer/internal/sync"
 )
 
 func TestSyncSummaryJSON(t *testing.T) {
-	zero := 0
+	started := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name    string
-		summary syncSummary
-		want    string
+		name          string
+		metrics       cache.RunMetrics
+		genresEnabled bool
+		want          string
 	}{
 		{
-			name:    "genres disabled omits bucket counts",
-			summary: syncSummary{Success: true, LikedTotal: 3},
-			want:    `{"success":true,"liked_total":3,"dedup_removed":0,"mirror_added":0,"mirror_removed":0,"duration_sec":0}`,
+			name: "full mode with genres disabled omits bucket counts and new tracks",
+			metrics: cache.RunMetrics{
+				Mode:       "full",
+				LikedTotal: 3,
+				StartedAt:  started,
+				FinishedAt: started.Add(2 * time.Second),
+			},
+			want: `{"success":true,"mode":"full","liked_total":3,"dedup_removed":0,` +
+				`"mirror_added":0,"mirror_removed":0,"duration_sec":2}`,
 		},
 		{
-			name:    "genres enabled keeps zero bucket counts",
-			summary: syncSummary{Success: true, BucketsCreated: &zero, BucketsRemoved: &zero},
-			want:    `{"success":true,"liked_total":0,"dedup_removed":0,"mirror_added":0,"mirror_removed":0,"duration_sec":0,"buckets_created":0,"buckets_removed":0}`,
+			name:          "genres enabled keeps zero bucket counts",
+			metrics:       cache.RunMetrics{Mode: "full"},
+			genresEnabled: true,
+			want: `{"success":true,"mode":"full","liked_total":0,"dedup_removed":0,` +
+				`"mirror_added":0,"mirror_removed":0,"duration_sec":0,"buckets_created":0,"buckets_removed":0}`,
+		},
+		{
+			name:    "fast mode reports new tracks even when zero",
+			metrics: cache.RunMetrics{Mode: "fast", LikedTotal: 10},
+			want: `{"success":true,"mode":"fast","liked_total":10,"new_tracks":0,"dedup_removed":0,` +
+				`"mirror_added":0,"mirror_removed":0,"duration_sec":0}`,
 		},
 		{
 			name:    "duplicate ids included when present",
-			summary: syncSummary{DuplicateIDs: []string{"a"}},
-			want:    `{"success":false,"liked_total":0,"dedup_removed":0,"mirror_added":0,"mirror_removed":0,"duration_sec":0,"duplicate_ids":["a"]}`,
+			metrics: cache.RunMetrics{Mode: "full", DedupRemoved: 1, DuplicateIDs: []string{"a"}},
+			want: `{"success":true,"mode":"full","liked_total":0,"dedup_removed":1,` +
+				`"mirror_added":0,"mirror_removed":0,"duration_sec":0,"duplicate_ids":["a"]}`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := json.Marshal(tt.summary)
+			summary := newSyncSummary(sync.RunResult{Metrics: tt.metrics, Success: true}, tt.genresEnabled)
+
+			got, err := json.Marshal(summary)
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
