@@ -87,7 +87,16 @@ func TestLikedIndexMatches(t *testing.T) {
 		track dedup.TrackRef
 		want  []spotify.ID
 	}{
-		{name: "exact ID wins", track: dedup.TrackRef{ID: "liked-album", ISRC: "X"}, want: []spotify.ID{"liked-album"}},
+		{
+			name:  "own ID first, then ISRC siblings",
+			track: dedup.TrackRef{ID: "liked-album", ISRC: "X"},
+			want:  []spotify.ID{"liked-album", "liked-single"},
+		},
+		{
+			name:  "own ID without ISRC matches only itself",
+			track: dedup.TrackRef{ID: "liked-album"},
+			want:  []spotify.ID{"liked-album"},
+		},
 		{
 			name:  "ISRC matches every liked release",
 			track: dedup.TrackRef{ID: "new", ISRC: "X"},

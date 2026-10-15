@@ -109,6 +109,45 @@ func TestReverseWithSyncStateUsesCacheAndVerifiesMatches(t *testing.T) {
 	}
 }
 
+func TestReverseCachedTrackUnlikedButSiblingStillLikedIsNotAdded(t *testing.T) {
+	fake := spotifytest.NewServer(t)
+	store := testStore(t)
+
+	// The last sync saw both C and E (same recording, ISRC Y) as liked. Since
+	// then C was unliked, but the album release E is still liked.
+	fake.Like(checkpointTime().Add(-time.Hour), spotifytest.Track{ID: "E", ISRC: "Y"})
+	if err := store.SaveCheckpoint(cache.Checkpoint{LatestAddedAt: checkpointTime()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTrackISRC(map[string]string{"C": "Y", "E": "Y"}); err != nil {
+		t.Fatal(err)
+	}
+
+	fake.AddPlaylist(spotifytest.Playlist{
+		Name:   "Source",
+		Tracks: []spotifytest.Track{{ID: "C", ISRC: "Y"}},
+	})
+	fake.ResetRequests()
+
+	result, err := sync.Reverse(t.Context(), testLogger(), testConfig(), fake.Client(), store,
+		sync.ReverseConfig{PlaylistIdentifier: "Source", BatchSize: 50})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+
+	if result.AlreadyLiked != 1 || result.NewlyAdded != 0 {
+		t.Errorf("result = %+v, want already liked 1, added 0", result)
+	}
+
+	if got, want := fake.LikedIDs(), []string{"E"}; !slices.Equal(got, want) {
+		t.Errorf("liked = %v, want %v", got, want)
+	}
+
+	if n := fake.CountRequests("GET /me/library/contains"); n != 1 {
+		t.Errorf("library contains called %d times, want 1", n)
+	}
+}
+
 func TestReverseDryRunSavesNothing(t *testing.T) {
 	fake := spotifytest.NewServer(t)
 	fake.AddPlaylist(spotifytest.Playlist{

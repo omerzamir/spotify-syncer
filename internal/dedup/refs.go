@@ -96,16 +96,29 @@ func (x *LikedIndex) Len() int {
 }
 
 // Matches returns the liked track IDs that make t "already liked": t's own ID
-// if it is liked, otherwise every liked track sharing t's ISRC. Returns nil
-// when nothing matches.
+// if it is liked, followed by every other liked track sharing t's non-empty
+// ISRC, without duplicates. Returns nil when nothing matches.
+//
+// The ISRC siblings are returned even when t's own ID is liked, because a
+// liked track from a possibly stale cache may no longer be liked while another
+// release of the same recording still is: verifying only t's own ID would then
+// wrongly report it as not liked.
 func (x *LikedIndex) Matches(t TrackRef) []spotify.ID {
+	var matches []spotify.ID
+
 	if _, ok := x.byID[t.ID]; ok {
-		return []spotify.ID{t.ID}
+		matches = append(matches, t.ID)
 	}
 
 	if t.ISRC == "" {
-		return nil
+		return matches
 	}
 
-	return x.byISRC[t.ISRC]
+	for _, id := range x.byISRC[t.ISRC] {
+		if id != t.ID {
+			matches = append(matches, id)
+		}
+	}
+
+	return matches
 }
