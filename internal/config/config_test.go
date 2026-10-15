@@ -102,6 +102,16 @@ func TestLoadErrors(t *testing.T) {
 	}{
 		{name: "unknown key", file: "sync:\n  batchsize: 10\n", wantErr: "field batchsize not found"},
 		{name: "invalid value", file: "sync:\n  batch_size: 0\n", wantErr: "sync.batch_size must be positive"},
+		{
+			name:    "rate below minimum",
+			file:    "rate_limit:\n  requests_per_second: 0.001\n",
+			wantErr: "rate_limit.requests_per_second must be at least 0.01",
+		},
+		{
+			name:    "zero rate",
+			file:    "rate_limit:\n  requests_per_second: 0\n",
+			wantErr: "rate_limit.requests_per_second must be at least",
+		},
 		{name: "bad duration", file: "genre:\n  artist_genre_ttl: soon\n", wantErr: "decoding config file"},
 		{name: "missing explicit file", path: "nope.yaml", wantErr: "opening config file"},
 	}
@@ -133,10 +143,16 @@ SPACED = padded   # trailing comment
 DOUBLE="line\nbreak # not a comment"
 SINGLE='lit\n'
 EMPTY=
+HASHED=a#b
+TABBED=v	# tab comment
+TRAILING=v   
+SPACE_EMPTY= # only a comment
+LEADING_HASH=#abc
 PRESET=overwritten
 `)
 
-	for _, key := range []string{"PLAIN", "EXPORTED", "SPACED", "DOUBLE", "SINGLE", "EMPTY"} {
+	for _, key := range []string{"PLAIN", "EXPORTED", "SPACED", "DOUBLE", "SINGLE", "EMPTY",
+		"HASHED", "TABBED", "TRAILING", "SPACE_EMPTY", "LEADING_HASH"} {
 		t.Setenv(key, "") // register cleanup, then unset so LoadDotEnv sets it
 		if err := os.Unsetenv(key); err != nil {
 			t.Fatal(err)
@@ -148,13 +164,18 @@ PRESET=overwritten
 	}
 
 	want := map[string]string{
-		"PLAIN":    "value",
-		"EXPORTED": "yes",
-		"SPACED":   "padded",
-		"DOUBLE":   "line\nbreak # not a comment",
-		"SINGLE":   `lit\n`,
-		"EMPTY":    "",
-		"PRESET":   "kept",
+		"PLAIN":        "value",
+		"EXPORTED":     "yes",
+		"SPACED":       "padded",
+		"DOUBLE":       "line\nbreak # not a comment",
+		"SINGLE":       `lit\n`,
+		"EMPTY":        "",
+		"HASHED":       "a#b",
+		"TABBED":       "v",
+		"TRAILING":     "v",
+		"SPACE_EMPTY":  "",
+		"LEADING_HASH": "#abc",
+		"PRESET":       "kept",
 	}
 	for key, value := range want {
 		if got := os.Getenv(key); got != value {

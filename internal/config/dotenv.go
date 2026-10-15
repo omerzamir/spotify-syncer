@@ -22,6 +22,9 @@ import (
 //	KEY="double quoted, with \n escapes"
 //	KEY='single quoted, literal'
 //	KEY=value # trailing comment (unquoted values only)
+//
+// In an unquoted value a comment starts at a '#' preceded by a space or tab,
+// so KEY=a#b keeps "a#b".
 func LoadDotEnv(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -72,7 +75,7 @@ func parseDotEnvLine(line string) (string, string, bool, error) {
 		return "", "", false, fmt.Errorf("invalid assignment %q", line)
 	}
 
-	value, err := parseDotEnvValue(strings.TrimSpace(raw))
+	value, err := parseDotEnvValue(raw)
 	if err != nil {
 		return "", "", false, fmt.Errorf("value of %s: %w", key, err)
 	}
@@ -80,21 +83,36 @@ func parseDotEnvLine(line string) (string, string, bool, error) {
 	return key, value, true, nil
 }
 
+// parseDotEnvValue parses the text after the '=' of an assignment. raw must
+// not be trimmed, so a '#' directly after the '=' is told apart from one after
+// whitespace.
 func parseDotEnvValue(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+
 	switch {
-	case strings.HasPrefix(raw, `"`):
-		value, err := strconv.Unquote(raw)
+	case strings.HasPrefix(trimmed, `"`):
+		value, err := strconv.Unquote(trimmed)
 		if err != nil {
 			return "", fmt.Errorf("malformed double-quoted value: %w", err)
 		}
 		return value, nil
-	case strings.HasPrefix(raw, "'"):
-		if len(raw) < 2 || !strings.HasSuffix(raw, "'") {
+	case strings.HasPrefix(trimmed, "'"):
+		if len(trimmed) < 2 || !strings.HasSuffix(trimmed, "'") {
 			return "", errors.New("unterminated single-quoted value")
 		}
-		return raw[1 : len(raw)-1], nil
+		return trimmed[1 : len(trimmed)-1], nil
 	default:
-		value, _, _ := strings.Cut(raw, " #")
-		return strings.TrimSpace(value), nil
+		return strings.TrimSpace(stripDotEnvComment(raw)), nil
 	}
+}
+
+// stripDotEnvComment removes a trailing comment from an unquoted value. A
+// comment starts at the first '#' that is preceded by a space or tab.
+func stripDotEnvComment(raw string) string {
+	for i := 1; i < len(raw); i++ {
+		if raw[i] == '#' && (raw[i-1] == ' ' || raw[i-1] == '\t') {
+			return raw[:i]
+		}
+	}
+	return raw
 }

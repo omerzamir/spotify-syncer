@@ -30,6 +30,10 @@ const (
 	defaultStateDir             = "./state"
 	defaultLogLevel             = "info"
 
+	// minRequestsPerSecond is the lowest accepted rate. Below it the limiter's
+	// interval (1s / rate) no longer fits in a time.Duration.
+	minRequestsPerSecond = 0.01
+
 	defaultConfigFile = "config.yaml"
 	dotEnvFile        = ".env"
 	envClientID       = "SPOTIFY_CLIENT_ID"
@@ -230,9 +234,10 @@ func (g GenreConfig) validate() error {
 	return nil
 }
 
+// validate reports whether the rate limit settings are usable.
 func (r RateLimitConfig) validate() error {
-	if r.RequestsPerSecond <= 0 {
-		return errors.New("rate_limit.requests_per_second must be positive")
+	if r.RequestsPerSecond < minRequestsPerSecond {
+		return fmt.Errorf("rate_limit.requests_per_second must be at least %g", minRequestsPerSecond)
 	}
 
 	if r.Burst <= 0 {
