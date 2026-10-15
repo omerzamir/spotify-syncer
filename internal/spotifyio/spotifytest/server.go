@@ -17,11 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zmb3/spotify/v2"
+	"github.com/omerzamir/spotify/v2"
 )
 
 const (
-	trackURIPrefix = "spotify:track:"
+	trackURIPrefix    = "spotify:track:"
+	playlistURIPrefix = "spotify:playlist:"
 
 	// Page size limits and default enforced by the real API.
 	maxLikedPageSize    = 50
@@ -44,10 +45,13 @@ type SavedTrack struct {
 	AddedAt time.Time
 }
 
-// Playlist is a playlist owned by the fake user.
+// Playlist is a playlist in the fake API. An empty Owner means the fake user
+// owns it; any other owner makes it a followed playlist, which the
+// February 2026 /items endpoints refuse with 403 like the real API.
 type Playlist struct {
 	ID          string
 	Name        string
+	Owner       string
 	Description string
 	Public      bool
 	Tracks      []Track
@@ -92,6 +96,13 @@ func NewServer(t testing.TB) *Server {
 	mux.HandleFunc("GET /playlists/{id}/tracks", s.handlePlaylistItems)
 	mux.HandleFunc("POST /playlists/{id}/tracks", s.handleAddPlaylistItems)
 	mux.HandleFunc("DELETE /playlists/{id}/tracks", s.handleRemovePlaylistItems)
+	mux.HandleFunc("GET /playlists/{id}/items", s.ownedOnly(s.handlePlaylistItems))
+	mux.HandleFunc("POST /playlists/{id}/items", s.ownedOnly(s.handleAddPlaylistItems))
+	mux.HandleFunc("DELETE /playlists/{id}/items", s.ownedOnly(s.handleRemovePlaylistItems))
+	mux.HandleFunc("POST /me/playlists", s.handleCreatePlaylist)
+	mux.HandleFunc("PUT /me/library", s.handleSaveTracks)
+	mux.HandleFunc("GET /me/library/contains", s.handleLikedContains)
+	mux.HandleFunc("DELETE /me/library", s.handleRemoveFromLibrary)
 	mux.HandleFunc("DELETE /playlists/{id}/followers", s.handleUnfollowPlaylist)
 	mux.HandleFunc("GET /artists", s.handleArtists)
 
@@ -296,6 +307,7 @@ type wireSavedTrack struct {
 }
 
 type wirePlaylistItem struct {
+	Item  *wireTrack `json:"item,omitempty"`
 	Track *wireTrack `json:"track"`
 }
 
@@ -344,6 +356,7 @@ type addItemsRequest struct {
 
 type removeItemsRequest struct {
 	Tracks []uriRef `json:"tracks"`
+	Items  []uriRef `json:"items"`
 }
 
 type uriRef struct {
@@ -375,7 +388,7 @@ func (s *Server) handleLikedTracks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLikedContains(w http.ResponseWriter, r *http.Request) {
-	ids := splitIDs(r.URL.Query().Get("ids"))
+	ids := requestTrackIDs(r)
 
 	s.mu.Lock()
 	result := make([]bool, len(ids))
@@ -388,7 +401,7 @@ func (s *Server) handleLikedContains(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSaveTracks(w http.ResponseWriter, r *http.Request) {
-	ids := splitIDs(r.URL.Query().Get("ids"))
+	ids := requestTrackIDs(r)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -451,10 +464,14 @@ func (s *Server) handlePlaylistItems(w http.ResponseWriter, r *http.Request) {
 	p := s.playlist(r.PathValue("id"))
 	var items []wirePlaylistItem
 	if p != nil {
+		newShape := strings.HasSuffix(r.URL.Path, "/items")
 		items = make([]wirePlaylistItem, len(p.Tracks))
 		for i, track := range p.Tracks {
 			wt := toWireTrack(track)
 			items[i] = wirePlaylistItem{Track: &wt}
+			if newShape {
+				items[i].Item = &wt
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -464,7 +481,12 @@ func (s *Server) handlePlaylistItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, paginate(s.srv.URL, r, items, maxItemsPageSize))
+	maxLimit := maxItemsPageSize
+	if strings.HasSuffix(r.URL.Path, "/items") {
+		maxLimit = maxPlaylistPageSize
+	}
+
+	writeJSON(w, http.StatusOK, paginate(s.srv.URL, r, items, maxLimit))
 }
 
 func (s *Server) handleAddPlaylistItems(w http.ResponseWriter, r *http.Request) {
@@ -511,8 +533,8 @@ func (s *Server) handleRemovePlaylistItems(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	remove := make(map[string]struct{}, len(req.Tracks))
-	for _, ref := range req.Tracks {
+	remove := make(map[string]struct{}, len(req.Tracks)+len(req.Items))
+	for _, ref := range slices.Concat(req.Tracks, req.Items) {
 		remove[strings.TrimPrefix(ref.URI, trackURIPrefix)] = struct{}{}
 	}
 	p.Tracks = slices.DeleteFunc(p.Tracks, func(t Track) bool {
@@ -532,6 +554,25 @@ func (s *Server) handleUnfollowPlaylist(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 }
 
+// handleRemoveFromLibrary handles DELETE /me/library: track URIs are unliked
+// and playlist URIs are unfollowed.
+func (s *Server) handleRemoveFromLibrary(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for uri := range strings.SplitSeq(r.URL.Query().Get("uris"), ",") {
+		if id, ok := strings.CutPrefix(uri, playlistURIPrefix); ok {
+			s.playlists = slices.DeleteFunc(s.playlists, func(p *Playlist) bool { return p.ID == id })
+			continue
+		}
+
+		id := strings.TrimPrefix(uri, trackURIPrefix)
+		s.liked = slices.DeleteFunc(s.liked, func(t SavedTrack) bool { return t.ID == id })
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
 func (s *Server) handleArtists(w http.ResponseWriter, r *http.Request) {
 	ids := splitIDs(r.URL.Query().Get("ids"))
 
@@ -547,6 +588,39 @@ func (s *Server) handleArtists(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// ownedOnly wraps a /playlists/{id}/items handler so that it fails with 403
+// for playlists the fake user does not own, like the real API.
+func (s *Server) ownedOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		p := s.playlist(r.PathValue("id"))
+		owned := p == nil || p.Owner == "" || p.Owner == s.userID
+		s.mu.Unlock()
+
+		if !owned {
+			writeError(w, http.StatusForbidden, "Forbidden.")
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+// requestTrackIDs returns the track IDs of a library request, given either as
+// ids=a,b (legacy /me/tracks) or uris=spotify:track:a,... (/me/library).
+func requestTrackIDs(r *http.Request) []string {
+	query := r.URL.Query()
+	if raw := query.Get("uris"); raw != "" {
+		uris := splitIDs(raw)
+		ids := make([]string, len(uris))
+		for i, uri := range uris {
+			ids[i] = strings.TrimPrefix(uri, trackURIPrefix)
+		}
+		return ids
+	}
+	return splitIDs(query.Get("ids"))
 }
 
 // like must be called with s.mu held.

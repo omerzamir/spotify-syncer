@@ -9,13 +9,17 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/zmb3/spotify/v2"
+	"github.com/omerzamir/spotify/v2"
 )
 
 const (
-	likedTracksPageSize   = 50
-	playlistItemsPageSize = 100
-	artistsBatchSize      = 50
+	likedTracksPageSize = 50
+	artistsBatchSize    = 50
+
+	// GET /playlists/{id}/items returns at most 50 items per page; the legacy
+	// /tracks endpoint returns up to 100.
+	playlistItemsPageSize        = 50
+	legacyPlaylistTracksPageSize = 100
 )
 
 // LikedTrackData holds the essential data extracted from a liked track for
@@ -114,7 +118,7 @@ func fetchLikedTracks(
 			allTracks = append(allTracks, LikedTrackData{
 				TrackID:    savedTrack.ID,
 				ArtistIDs:  artistIDs,
-				ISRC:       isrcOf(savedTrack.ExternalIDs),
+				ISRC:       savedTrack.ExternalIDs.ISRC,
 				AddedAt:    savedTrack.AddedAt,
 				IsPlayable: isPlayable,
 			})
@@ -146,14 +150,6 @@ func addedBefore(ctx context.Context, logger *slog.Logger, addedAt string, since
 	return t.Before(since)
 }
 
-// isrcOf returns the ISRC from a track's external IDs, or "" when absent.
-func isrcOf(externalIDs map[string]string) string {
-	if externalIDs == nil {
-		return ""
-	}
-	return externalIDs["isrc"]
-}
-
 // PlaylistTrackData holds the identity of a track in a playlist: its Spotify
 // ID and, when Spotify returns one, its ISRC.
 type PlaylistTrackData struct {
@@ -165,7 +161,43 @@ type PlaylistTrackData struct {
 // track's ID and ISRC in playlist order. Skips episodes, unavailable tracks and
 // local files (which have no Spotify ID). Uses Fields() so only the ID, type
 // and ISRC of each item are transferred.
+//
+// It reads GET /playlists/{id}/items and falls back to the legacy
+// GET /playlists/{id}/tracks when the new endpoint is unavailable, which is
+// the case for playlists the user does not own or collaborate on.
 func FetchPlaylistTracks(
+	ctx context.Context,
+	logger *slog.Logger,
+	client *spotify.Client,
+	playlistID spotify.ID,
+) ([]PlaylistTrackData, error) {
+	var tracks []PlaylistTrackData
+
+	err := withLegacyFallback(ctx, logger, "GET /playlists/{id}/items",
+		func() error {
+			var err error
+			tracks, err = fetchPlaylistItems(ctx, logger, client, playlistID)
+			return err
+		},
+		func() error {
+			var err error
+			tracks, err = fetchPlaylistTracksLegacy(ctx, client, playlistID)
+			return err
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.InfoContext(ctx, "fetched playlist tracks",
+		"playlist_id", playlistID,
+		"total", len(tracks))
+
+	return tracks, nil
+}
+
+// fetchPlaylistItems reads a playlist through GET /playlists/{id}/items.
+func fetchPlaylistItems(
 	ctx context.Context,
 	logger *slog.Logger,
 	client *spotify.Client,
@@ -175,7 +207,7 @@ func FetchPlaylistTracks(
 		ctx,
 		playlistID,
 		spotify.Limit(playlistItemsPageSize),
-		spotify.Fields("items(track(type,id,external_ids(isrc))),next,total"),
+		spotify.Fields("items(item(type,id,external_ids(isrc))),next,total"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("fetching first page of playlist items: %w", err)
@@ -185,44 +217,67 @@ func FetchPlaylistTracks(
 
 	for {
 		for _, item := range page.Items {
-			if item.Track.Episode != nil {
-				logger.DebugContext(ctx, "skipping episode in playlist",
-					"playlist_id", playlistID)
-				continue
-			}
+			track := item.Track.Track
 
-			if item.Track.Track == nil {
-				logger.WarnContext(ctx, "skipping null or unavailable track in playlist",
-					"playlist_id", playlistID)
-				continue
+			switch {
+			case item.Track.Episode != nil:
+				logger.DebugContext(ctx, "skipping episode in playlist", "playlist_id", playlistID)
+			case track == nil:
+				logger.WarnContext(ctx, "skipping null or unavailable track in playlist", "playlist_id", playlistID)
+			case track.ID == "":
+				logger.DebugContext(ctx, "skipping local file in playlist", "playlist_id", playlistID)
+			default:
+				tracks = append(tracks, PlaylistTrackData{TrackID: track.ID, ISRC: track.ExternalIDs.ISRC})
 			}
-
-			if item.Track.Track.ID == "" {
-				logger.DebugContext(ctx, "skipping local file in playlist",
-					"playlist_id", playlistID)
-				continue
-			}
-
-			tracks = append(tracks, PlaylistTrackData{
-				TrackID: item.Track.Track.ID,
-				ISRC:    isrcOf(item.Track.Track.ExternalIDs),
-			})
 		}
 
 		err = client.NextPage(ctx, page)
 		if errors.Is(err, spotify.ErrNoMorePages) {
-			break
+			return tracks, nil
 		}
 		if err != nil {
 			return nil, fmt.Errorf("paging playlist items: %w", err)
 		}
 	}
+}
 
-	logger.InfoContext(ctx, "fetched playlist tracks",
-		"playlist_id", playlistID,
-		"total", len(tracks))
+// fetchPlaylistTracksLegacy reads a playlist through the legacy
+// GET /playlists/{id}/tracks endpoint, which only returns tracks.
+func fetchPlaylistTracksLegacy(
+	ctx context.Context,
+	client *spotify.Client,
+	playlistID spotify.ID,
+) ([]PlaylistTrackData, error) {
+	//nolint:staticcheck // SA1019: the legacy endpoint is the deliberate fallback.
+	page, err := client.GetPlaylistTracks(
+		ctx,
+		playlistID,
+		spotify.Limit(legacyPlaylistTracksPageSize),
+		spotify.Fields("items(track(type,id,external_ids(isrc))),next,total"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fetching first page of playlist tracks: %w", err)
+	}
 
-	return tracks, nil
+	var tracks []PlaylistTrackData
+
+	for {
+		for _, item := range page.Tracks {
+			// Unavailable tracks decode as an empty track and local files have
+			// no ID; neither can be added to another playlist.
+			if item.Track.ID != "" && item.Track.Type != "episode" {
+				tracks = append(tracks, PlaylistTrackData{TrackID: item.Track.ID, ISRC: item.Track.ExternalIDs.ISRC})
+			}
+		}
+
+		err = client.NextPage(ctx, page)
+		if errors.Is(err, spotify.ErrNoMorePages) {
+			return tracks, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("paging playlist tracks: %w", err)
+		}
+	}
 }
 
 // FetchPlaylistTrackIDs paginates through a playlist's items and returns
@@ -260,7 +315,10 @@ func BatchGetArtists(
 	for i := 0; i < len(artistIDs); i += artistsBatchSize {
 		end := min(i+artistsBatchSize, len(artistIDs))
 		batch := artistIDs[i:end]
-		artists, err := client.GetArtists(ctx, batch...)
+		// Batch GET /artists is deprecated and removed for Development Mode
+		// apps created after February 2026; it still works for this app.
+		// Moving to per-artist requests is tracked as a follow-up.
+		artists, err := client.GetArtists(ctx, batch...) //nolint:staticcheck // SA1019: see comment above.
 		if err != nil {
 			return nil, fmt.Errorf("fetching artists batch %d-%d: %w", i, end-1, err)
 		}

@@ -140,7 +140,7 @@ func TestRunFastDoesNotAdvanceCheckpointOnFailure(t *testing.T) {
 	runSync(t, fake, cfg, store, sync.RunOptions{Mode: sync.ModeFull})
 
 	mirror, _ := fake.PlaylistByName(cfg.Sync.MirrorPlaylistName)
-	fake.SetStatus("POST /playlists/"+mirror.ID+"/tracks", http.StatusInternalServerError)
+	fake.SetStatus("POST /playlists/"+mirror.ID+"/items", http.StatusInternalServerError)
 	fake.Like(likedAt(2), spotifytest.Track{ID: "b", ISRC: "B"})
 
 	if _, err := sync.Run(t.Context(), testLogger(), cfg, fake.Client(), store,
@@ -153,7 +153,7 @@ func TestRunFastDoesNotAdvanceCheckpointOnFailure(t *testing.T) {
 		t.Errorf("checkpoint = %v, %v; want unchanged %v", checkpoint.LatestAddedAt, err, likedAt(1))
 	}
 
-	fake.SetStatus("POST /playlists/"+mirror.ID+"/tracks", 0)
+	fake.SetStatus("POST /playlists/"+mirror.ID+"/items", 0)
 	retry := runSync(t, fake, cfg, store, sync.RunOptions{Mode: sync.ModeFast})
 
 	if retry.Metrics.MirrorAdded != 1 {

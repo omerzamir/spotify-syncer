@@ -8,7 +8,7 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/zmb3/spotify/v2"
+	"github.com/omerzamir/spotify/v2"
 
 	"spotify-syncer/internal/cache"
 	"spotify-syncer/internal/config"

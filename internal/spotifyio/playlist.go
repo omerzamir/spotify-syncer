@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/zmb3/spotify/v2"
+	"github.com/omerzamir/spotify/v2"
 
 	"spotify-syncer/internal/cache"
 )
@@ -50,7 +50,8 @@ func FindOrCreatePlaylist(
 }
 
 // CreatePlaylist creates a new, non-collaborative playlist owned by the
-// current user and returns its ID.
+// current user and returns its ID. It uses POST /me/playlists and falls back
+// to the legacy POST /users/{id}/playlists.
 func CreatePlaylist(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -59,12 +60,25 @@ func CreatePlaylist(
 	description string,
 	public bool,
 ) (spotify.ID, error) {
-	user, err := client.CurrentUser(ctx)
-	if err != nil {
-		return "", fmt.Errorf("getting current user: %w", err)
-	}
+	var playlist *spotify.FullPlaylist
 
-	playlist, err := client.CreatePlaylistForUser(ctx, user.ID, name, description, public, false)
+	err := withLegacyFallback(ctx, logger, "POST /me/playlists",
+		func() error {
+			var err error
+			playlist, err = client.CreatePlaylist(ctx, name, description, public, false)
+			return err
+		},
+		func() error {
+			user, err := client.CurrentUser(ctx)
+			if err != nil {
+				return fmt.Errorf("getting current user: %w", err)
+			}
+
+			//nolint:staticcheck // SA1019: the legacy endpoint is the deliberate fallback.
+			playlist, err = client.CreatePlaylistForUser(ctx, user.ID, name, description, public, false)
+			return err
+		},
+	)
 	if err != nil {
 		return "", fmt.Errorf("creating playlist %q: %w", name, err)
 	}
@@ -170,8 +184,17 @@ func BatchAddTracks(
 		trackIDs,
 		batchSize,
 		func(ctx context.Context, playlistID spotify.ID, batch []spotify.ID) error {
-			_, err := client.AddTracksToPlaylist(ctx, playlistID, batch...)
-			return err
+			return withLegacyFallback(ctx, logger, "POST /playlists/{id}/items",
+				func() error {
+					_, err := client.AddItemsToPlaylist(ctx, playlistID, trackURIs(batch)...)
+					return err
+				},
+				func() error {
+					//nolint:staticcheck // SA1019: the legacy endpoint is the deliberate fallback.
+					_, err := client.AddTracksToPlaylist(ctx, playlistID, batch...)
+					return err
+				},
+			)
 		},
 		"adding",
 		"added",
@@ -196,8 +219,17 @@ func BatchRemoveTracks(
 		trackIDs,
 		batchSize,
 		func(ctx context.Context, playlistID spotify.ID, batch []spotify.ID) error {
-			_, err := client.RemoveTracksFromPlaylist(ctx, playlistID, batch...)
-			return err
+			return withLegacyFallback(ctx, logger, "DELETE /playlists/{id}/items",
+				func() error {
+					_, err := client.RemoveItemsFromPlaylist(ctx, playlistID, trackURIs(batch)...)
+					return err
+				},
+				func() error {
+					//nolint:staticcheck // SA1019: the legacy endpoint is the deliberate fallback.
+					_, err := client.RemoveTracksFromPlaylist(ctx, playlistID, batch...)
+					return err
+				},
+			)
 		},
 		"removing",
 		"removed",
@@ -206,13 +238,22 @@ func BatchRemoveTracks(
 
 // UnfollowPlaylist unfollows (deletes) a playlist from the user's library.
 // This is used for cleaning up stale genre playlists that are no longer needed.
+// It uses DELETE /me/library and falls back to the legacy
+// DELETE /playlists/{id}/followers.
 func UnfollowPlaylist(
 	ctx context.Context,
 	logger *slog.Logger,
 	client *spotify.Client,
 	playlistID spotify.ID,
 ) error {
-	err := client.UnfollowPlaylist(ctx, playlistID)
+	err := withLegacyFallback(ctx, logger, "DELETE /me/library",
+		func() error {
+			return client.RemoveItemsFromLibrary(ctx, spotify.URI("spotify:playlist:"+string(playlistID)))
+		},
+		func() error {
+			return client.UnfollowPlaylist(ctx, playlistID) //nolint:staticcheck // SA1019: deliberate fallback.
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("unfollowing playlist %s: %w", playlistID, err)
 	}

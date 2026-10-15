@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/zmb3/spotify/v2"
+	"github.com/omerzamir/spotify/v2"
 )
 
 const (
-	maxLibraryBatchSize = 50
+	// MaxLibraryBatchSize is the most tracks PUT /me/library and
+	// GET /me/library/contains accept per request.
+	MaxLibraryBatchSize = 40
 
 	playlistURIPrefix = "spotify:playlist:"
 	playlistURLMarker = "open.spotify.com/playlist/"
@@ -99,7 +101,8 @@ func ResolvePlaylist(
 }
 
 // BatchAddTracksToLibrary saves tracks to the current user's Liked Songs library
-// in batches of up to 50 tracks (Spotify API maximum).
+// in batches of up to MaxLibraryBatchSize tracks. It uses PUT /me/library and
+// falls back to the legacy PUT /me/tracks.
 func BatchAddTracksToLibrary(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -111,15 +114,21 @@ func BatchAddTracksToLibrary(
 		return nil
 	}
 
-	if batchSize <= 0 || batchSize > maxLibraryBatchSize {
-		batchSize = maxLibraryBatchSize
+	if batchSize <= 0 || batchSize > MaxLibraryBatchSize {
+		batchSize = MaxLibraryBatchSize
 	}
 
 	for i := 0; i < len(trackIDs); i += batchSize {
 		end := min(i+batchSize, len(trackIDs))
 		batch := trackIDs[i:end]
 
-		if err := client.AddTracksToLibrary(ctx, batch...); err != nil {
+		err := withLegacyFallback(ctx, logger, "PUT /me/library",
+			func() error { return client.AddItemsToLibrary(ctx, trackURIs(batch)...) },
+			func() error {
+				return client.AddTracksToLibrary(ctx, batch...) //nolint:staticcheck // SA1019: deliberate fallback.
+			},
+		)
+		if err != nil {
 			return fmt.Errorf(
 				"saving tracks batch %d-%d to library: %w (ensure 'syncer auth' has been run to grant 'user-library-modify' permission)",
 				i,
@@ -141,7 +150,9 @@ func BatchAddTracksToLibrary(
 }
 
 // BatchCheckTracksInLibrary checks which tracks are already saved in the current
-// user's Liked Songs library. Queries in batches of up to 50 tracks.
+// user's Liked Songs library, in batches of up to MaxLibraryBatchSize tracks.
+// It uses GET /me/library/contains and falls back to the legacy
+// GET /me/tracks/contains.
 // Returns a map where key is track ID and value is true if already saved.
 func BatchCheckTracksInLibrary(
 	ctx context.Context,
@@ -154,11 +165,24 @@ func BatchCheckTracksInLibrary(
 		return result, nil
 	}
 
-	for i := 0; i < len(trackIDs); i += maxLibraryBatchSize {
-		end := min(i+maxLibraryBatchSize, len(trackIDs))
+	for i := 0; i < len(trackIDs); i += MaxLibraryBatchSize {
+		end := min(i+MaxLibraryBatchSize, len(trackIDs))
 		batch := trackIDs[i:end]
 
-		contains, err := client.UserHasTracks(ctx, batch...)
+		var contains []bool
+
+		err := withLegacyFallback(ctx, logger, "GET /me/library/contains",
+			func() error {
+				var err error
+				contains, err = client.UserHasLibraryItems(ctx, trackURIs(batch)...)
+				return err
+			},
+			func() error {
+				var err error
+				contains, err = client.UserHasTracks(ctx, batch...) //nolint:staticcheck // SA1019: deliberate fallback.
+				return err
+			},
+		)
 		if err != nil {
 			return nil, fmt.Errorf("checking tracks library status batch %d-%d: %w", i, end-1, err)
 		}

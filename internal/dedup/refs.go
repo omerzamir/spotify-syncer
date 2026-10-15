@@ -1,7 +1,7 @@
 package dedup
 
 import (
-	"github.com/zmb3/spotify/v2"
+	"github.com/omerzamir/spotify/v2"
 )
 
 // TrackRef identifies a track by Spotify ID and, when known, its ISRC. The

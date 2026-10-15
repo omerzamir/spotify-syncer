@@ -7,13 +7,14 @@ import (
 	"io"
 
 	"spotify-syncer/internal/auth"
+	"spotify-syncer/internal/spotifyio"
 	"spotify-syncer/internal/sync"
 )
 
 const (
 	// defaultLibraryBatchSize is Spotify's maximum number of tracks per
 	// save-to-library request.
-	defaultLibraryBatchSize = 50
+	defaultLibraryBatchSize = spotifyio.MaxLibraryBatchSize
 )
 
 // authCommand performs the interactive OAuth login and saves the token.
@@ -121,7 +122,7 @@ func reverseCommand(ctx context.Context, args []string, stdout, stderr io.Writer
 		"Playlist name, ID, or URL (default: mirror_playlist_name from config)")
 	fs.BoolVar(&reverseCfg.DryRun, "dry-run", false,
 		"Preview tracks that would be added without actually adding them")
-	fs.IntVar(&reverseCfg.BatchSize, "batch-size", defaultLibraryBatchSize, "Batch size for saving tracks (max 50)")
+	fs.IntVar(&reverseCfg.BatchSize, "batch-size", defaultLibraryBatchSize, "Batch size for saving tracks (max 40)")
 
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err

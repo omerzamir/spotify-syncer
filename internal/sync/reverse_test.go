@@ -50,7 +50,7 @@ func TestReverseWithoutSyncStateFetchesLibraryAndMatchesByISRC(t *testing.T) {
 		t.Errorf("liked = %v, want %v", got, want)
 	}
 
-	if n := fake.CountRequests("GET /me/tracks/contains"); n != 0 {
+	if n := fake.CountRequests("GET /me/library/contains"); n != 0 {
 		t.Errorf("library contains called %d times, want 0 (full fetch is authoritative)", n)
 	}
 }
@@ -100,7 +100,7 @@ func TestReverseWithSyncStateUsesCacheAndVerifiesMatches(t *testing.T) {
 		t.Errorf("liked = %v, want %v", got, want)
 	}
 
-	if n := fake.CountRequests("GET /me/tracks/contains"); n != 1 {
+	if n := fake.CountRequests("GET /me/library/contains"); n != 1 {
 		t.Errorf("library contains called %d times, want 1", n)
 	}
 	if n := fake.CountRequests("GET /me/tracks"); n != 1 {
@@ -127,7 +127,32 @@ func TestReverseDryRunSavesNothing(t *testing.T) {
 	if liked := fake.LikedIDs(); len(liked) != 0 {
 		t.Errorf("liked = %v, want none", liked)
 	}
-	if n := fake.CountRequests("PUT /me/tracks"); n != 0 {
+	if n := fake.CountRequests("PUT /me/library"); n != 0 {
 		t.Errorf("save called %d times in dry run", n)
+	}
+}
+
+func TestReverseFromFollowedPlaylistFallsBackToLegacyEndpoint(t *testing.T) {
+	fake := spotifytest.NewServer(t)
+	fake.AddPlaylist(spotifytest.Playlist{
+		Name:   "Someone Else's Mix",
+		Owner:  "another-user",
+		Tracks: []spotifytest.Track{{ID: "a", ISRC: "A"}, {ID: "b", ISRC: "B"}},
+	})
+
+	result, err := sync.Reverse(t.Context(), testLogger(), testConfig(), fake.Client(), testStore(t),
+		sync.ReverseConfig{PlaylistIdentifier: "Someone Else's Mix", BatchSize: 40})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+
+	if result.NewlyAdded != 2 {
+		t.Errorf("NewlyAdded = %d, want 2", result.NewlyAdded)
+	}
+
+	requests := fake.Requests()
+	if !slices.Contains(requests, "GET /playlists/pl1/items") ||
+		!slices.Contains(requests, "GET /playlists/pl1/tracks") {
+		t.Errorf("requests = %v, want a 403 on /items followed by the legacy /tracks read", requests)
 	}
 }

@@ -10,6 +10,7 @@ A Go CLI tool that syncs your liked/saved songs into playlists:
 - **Dynamic genre discovery**: Automatically creates genre playlists based on your library
 - **Aggressive caching**: Minimizes API calls by caching artist genres, playlist contents, and track metadata
 - **Rate limiting**: Built-in rate limiting with automatic retry on 429 responses
+- **Future-proof API usage**: Uses the endpoints Spotify introduced in February 2026 (`/playlists/{id}/items`, `/me/playlists`, `/me/library`) and falls back to the older ones per request when a new endpoint is unavailable, for example when reading a playlist you follow but do not own
 - **Reverse sync**: Add all songs from any playlist (by name, ID, or URL) into your Liked Songs library
 - **Playlist merge**: Merge two or more playlists into a new playlist with automatic track deduplication
 - **Fast mode**: Incremental sync that only adds songs liked since the last run (see [Sync modes](#sync-modes))
@@ -156,7 +157,7 @@ After the first `syncer run`, reverse only fetches the songs liked since that ru
 **Flags:**
 - `--playlist`: Playlist name, Spotify ID, or Spotify URL (default: `mirror_playlist_name` from config)
 - `--dry-run`: Preview tracks that would be added without making changes (default: `false`)
-- `--batch-size`: Batch size for saving tracks (1-50, default: `50`)
+- `--batch-size`: Batch size for saving tracks (1-40, default: `40`)
 - `--config`: Path to config file (default: `config.yaml` in current directory)
 
 **Output:**
