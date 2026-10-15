@@ -194,6 +194,15 @@ func (s *Server) SetStatus(methodAndPath string, status int) {
 	s.statuses[methodAndPath] = status
 }
 
+// DeletePlaylist removes a playlist, as if the user deleted it in Spotify.
+// Later requests for its ID fail with 404.
+func (s *Server) DeletePlaylist(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.playlists = slices.DeleteFunc(s.playlists, func(p *Playlist) bool { return p.ID == id })
+}
+
 // LikedIDs returns the IDs of liked tracks, newest first.
 func (s *Server) LikedIDs() []string {
 	s.mu.Lock()

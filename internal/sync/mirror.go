@@ -31,7 +31,7 @@ func Mirror(
 	desiredTracks []spotify.ID,
 	forceRefresh bool,
 ) (MirrorResult, error) {
-	playlistID, err := findOrCreatePlaylist(
+	playlistID, cachedID, err := findOrCreatePlaylist(
 		ctx,
 		logger,
 		client,
@@ -41,6 +41,16 @@ func Mirror(
 	)
 	if err != nil {
 		return MirrorResult{}, fmt.Errorf("finding or creating mirror playlist: %w", err)
+	}
+
+	if !cachedID {
+		// The playlist was recreated or re-resolved by name, so the cached
+		// contents describe a different playlist.
+		logger.InfoContext(ctx, "mirror playlist is not the cached one, discarding cached mirror tracks",
+			"playlist_id", playlistID)
+		if evictErr := store.EvictMirrorTracks(); evictErr != nil {
+			return MirrorResult{}, fmt.Errorf("evicting stale mirror tracks cache: %w", evictErr)
+		}
 	}
 
 	syncCfg := syncConfig{

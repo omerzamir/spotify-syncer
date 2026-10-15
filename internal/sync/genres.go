@@ -129,7 +129,7 @@ func syncBucket(
 	forceRefresh bool,
 ) (bucketSyncResult, error) {
 	playlistName := cfg.Genre.BucketPlaylistPrefix + bucketName
-	playlistID, err := findOrCreatePlaylist(
+	playlistID, cachedID, err := findOrCreatePlaylist(
 		ctx,
 		logger,
 		client,
@@ -139,6 +139,18 @@ func syncBucket(
 	)
 	if err != nil {
 		return bucketSyncResult{}, fmt.Errorf("finding or creating playlist: %w", err)
+	}
+
+	if !cachedID {
+		// The playlist was recreated or re-resolved by name, so the cached
+		// contents describe a different playlist.
+		logger.InfoContext(ctx, "bucket playlist is not the cached one, discarding cached bucket tracks",
+			"bucket", bucketName,
+			"playlist_id", playlistID)
+		delete(cachedBuckets, bucketName)
+		if evictErr := store.EvictBucketTracks(bucketName); evictErr != nil {
+			return bucketSyncResult{}, fmt.Errorf("evicting stale bucket tracks cache: %w", evictErr)
+		}
 	}
 
 	syncCfg := syncConfig{
