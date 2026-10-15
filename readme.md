@@ -11,6 +11,7 @@ A Go CLI tool that syncs your liked/saved songs into playlists:
 - **Aggressive caching**: Minimizes API calls by caching artist genres, playlist contents, and track metadata
 - **Rate limiting**: Built-in rate limiting with automatic retry on 429 responses
 - **Reverse sync**: Add all songs from any playlist (by name, ID, or URL) into your Liked Songs library
+- **Playlist merge**: Merge two or more playlists into a new playlist with automatic track deduplication
 - **Fast mode**: Incremental sync support (coming soon)
 
 ## Getting Started
@@ -148,6 +149,45 @@ Adds all songs from a playlist (by name, ID, or URL) into your Liked Songs libra
   "duration_sec": 3.4
 }
 ```
+
+### `syncer merge`
+
+Merges tracks from two or more source playlists into a newly created playlist. Source playlists can be passed as playlist names, Spotify IDs, Spotify URIs, or Spotify URLs. Tracks are automatically deduplicated across all playlists (unless disabled with `--dedup=false`).
+
+**Usage:**
+
+```bash
+syncer merge <source1> <source2> [source3...] --name "Merged Playlist"
+```
+
+**Flags:**
+- `-n, --name`: Name of the new merged playlist (required)
+- `--public`: Make the new playlist public (default: `true`)
+- `--dedup`: Deduplicate tracks across all playlists (default: `true`)
+- `--dry-run`: Preview tracks that would be merged without creating the playlist (default: `false`)
+- `--source`: Specify a source playlist (can be passed multiple times as an alternative to positional arguments)
+- `--config`: Path to config file (default: `config.yaml` in current directory)
+
+**Output:**
+
+```json
+{
+  "success": true,
+  "sources": [
+    { "name": "Playlist 1", "id": "37i9dQZF1DXcBWIGoYBM5M", "tracks": 50 },
+    { "name": "Playlist 2", "id": "4aawyAB9vmqN3uQFRjYTkK", "tracks": 40 },
+    { "name": "Playlist 3", "id": "2A1...", "tracks": 35 }
+  ],
+  "target_name": "Merged Trilogy",
+  "target_id": "7Y2...",
+  "total_tracks": 125,
+  "unique_tracks": 110,
+  "duplicates_skipped": 15,
+  "dry_run": false,
+  "duration_sec": 2.45
+}
+```
+
 
 
 ## Cron Integration
