@@ -97,9 +97,41 @@ func setupCommands() *cobra.Command {
 	reverseCmd.Flags().BoolVar(&reverseDryRun, "dry-run", false, "Preview tracks that would be added without actually adding them")
 	reverseCmd.Flags().IntVar(&reverseBatchSize, "batch-size", 50, "Batch size for saving tracks (max 50)")
 
+	var mergeSourcesFlag []string
+	var mergeTargetName string
+	var mergePublic bool
+	var mergeDedup bool
+	var mergeDryRun bool
+
+	mergeCmd := &cobra.Command{
+		Use:   "merge <source1> <source2> [source3...] [flags]",
+		Short: "Merge multiple playlists together into a new playlist",
+		Long:  "Fetches tracks from two or more source playlists and creates a new playlist containing the combined tracks",
+		RunE: func(_ *cobra.Command, args []string) error {
+			sources := args
+			if len(sources) == 0 {
+				sources = mergeSourcesFlag
+			}
+			if len(sources) < 2 {
+				return errors.New("at least two source playlists are required: provide as arguments ('syncer merge <p1> <p2> <p3>') or with --source")
+			}
+			if mergeTargetName == "" {
+				return errors.New("target playlist name is required (--name / -n)")
+			}
+			return runMerge(configPath, sources, mergeTargetName, mergePublic, mergeDedup, mergeDryRun)
+		},
+	}
+
+	mergeCmd.Flags().StringSliceVar(&mergeSourcesFlag, "source", nil, "Source playlist (can specify multiple times: --source p1 --source p2 --source p3)")
+	mergeCmd.Flags().StringVarP(&mergeTargetName, "name", "n", "", "Name of the new merged playlist (required)")
+	mergeCmd.Flags().BoolVar(&mergePublic, "public", true, "Make the new playlist public")
+	mergeCmd.Flags().BoolVar(&mergeDedup, "dedup", true, "Deduplicate tracks across all playlists")
+	mergeCmd.Flags().BoolVar(&mergeDryRun, "dry-run", false, "Preview tracks that would be merged without creating the playlist")
+
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(reverseCmd)
+	rootCmd.AddCommand(mergeCmd)
 
 	return rootCmd
 }
@@ -276,6 +308,79 @@ func runReverse(configPath, playlistIdentifier string, dryRun bool, batchSize in
 		"newly_added":   result.NewlyAdded,
 		"dry_run":       result.DryRun,
 		"duration_sec":  result.DurationSec,
+	}
+
+	summaryJSON, err := json.Marshal(summary)
+	if err != nil {
+		return fmt.Errorf("marshaling summary: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "%s\n", summaryJSON)
+	return nil
+}
+
+func runMerge(configPath string, sources []string, targetName string, public, dedup, dryRun bool) error {
+	cfg, logger := loadConfigAndLogger(configPath, false)
+
+	store, err := cache.NewStore(cfg.StateDir, logger)
+	if err != nil {
+		return fmt.Errorf("creating cache store: %w", err)
+	}
+
+	token, err := store.LoadToken()
+	if err != nil {
+		return fmt.Errorf("loading token: %w", err)
+	}
+
+	if token == nil {
+		log.Printf("no saved token found, run 'syncer auth' first")
+		return errors.New("no saved token found, run 'syncer auth' first")
+	}
+
+	ctx, cancel := setupContextWithLogger(logger)
+	defer cancel()
+
+	tokenSource := auth.NewTokenSource(ctx, cfg.Spotify, token)
+	client, err := spotifyio.NewClient(ctx, logger, cfg, tokenSource)
+	if err != nil {
+		return fmt.Errorf("creating Spotify client: %w", err)
+	}
+
+	updatedToken, err := tokenSource.Token()
+	if err != nil {
+		return fmt.Errorf("getting token: %w", err)
+	}
+
+	if updatedToken.AccessToken != token.AccessToken {
+		if saveErr := store.SaveToken(updatedToken); saveErr != nil {
+			logger.WarnContext(ctx, "failed to save refreshed token", "error", saveErr)
+		}
+	}
+
+	result, err := sync.MergePlaylists(ctx, logger, cfg, client, sync.MergeConfig{
+		Sources:     sources,
+		TargetName:  targetName,
+		Public:      public,
+		Deduplicate: dedup,
+		DryRun:      dryRun,
+	})
+	if err != nil {
+		return fmt.Errorf("merge failed: %w", err)
+	}
+
+	summary := map[string]interface{}{
+		"success":            true,
+		"sources":            result.Sources,
+		"target_name":        result.TargetName,
+		"total_tracks":       result.TotalTracks,
+		"unique_tracks":      result.UniqueTracks,
+		"duplicates_skipped": result.DuplicatesSkipped,
+		"dry_run":            result.DryRun,
+		"duration_sec":       result.DurationSec,
+	}
+
+	if result.TargetID != "" {
+		summary["target_id"] = result.TargetID
 	}
 
 	summaryJSON, err := json.Marshal(summary)
