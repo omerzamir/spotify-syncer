@@ -5,8 +5,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/zmb3/spotify/v2"
 
 	"spotify-syncer/internal/cache"
@@ -53,7 +54,9 @@ func Genres(
 		BucketsSynced: len(buckets),
 	}
 
-	for bucketName, desiredTracks := range buckets {
+	for _, bucketName := range slices.Sorted(maps.Keys(buckets)) {
+		desiredTracks := buckets[bucketName]
+
 		bucketResult, syncErr := syncBucket(
 			ctx,
 			logger,
@@ -178,14 +181,9 @@ func findStaleBuckets(
 	currentBuckets map[string][]spotify.ID,
 	cachedBuckets map[string][]string,
 ) []string {
-	currentSet := mapset.NewSet[string]()
-	for bucketName := range currentBuckets {
-		currentSet.Add(bucketName)
-	}
-
 	var stale []string
-	for bucketName := range cachedBuckets {
-		if !currentSet.Contains(bucketName) {
+	for _, bucketName := range slices.Sorted(maps.Keys(cachedBuckets)) {
+		if _, ok := currentBuckets[bucketName]; !ok {
 			stale = append(stale, bucketName)
 		}
 	}

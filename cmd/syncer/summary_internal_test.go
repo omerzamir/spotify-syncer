@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/json"
 	"testing"
-
-	"spotify-syncer/internal/sync"
 )
 
 func TestSyncSummaryJSON(t *testing.T) {
@@ -47,14 +45,14 @@ func TestSyncSummaryJSON(t *testing.T) {
 
 func TestReverseSummaryJSONFlattensResult(t *testing.T) {
 	got, err := json.Marshal(reverseSummary{
-		Success:       true,
-		ReverseResult: sync.ReverseResult{PlaylistName: "p", PlaylistID: "id", TotalTracks: 2, NewlyAdded: 1},
+		Success:      true,
+		PlaylistName: "p", PlaylistID: "id", TotalTracks: 2, NewlyAdded: 1,
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	want := `{"success":true,"playlist_name":"p","playlist_id":"id","total_tracks":2,"already_liked":0,"newly_added":1,"dry_run":false,"duration_sec":0}`
+	want := `{"playlist_name":"p","playlist_id":"id","total_tracks":2,"already_liked":0,"newly_added":1,"dry_run":false,"duration_sec":0,"success":true}`
 	if string(got) != want {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
@@ -62,14 +60,14 @@ func TestReverseSummaryJSONFlattensResult(t *testing.T) {
 
 func TestMergeSummaryJSONOmitsEmptyTargetID(t *testing.T) {
 	got, err := json.Marshal(mergeSummary{
-		Success:     true,
-		MergeResult: sync.MergeResult{TargetName: "t", DryRun: true},
+		Success:    true,
+		TargetName: "t", DryRun: true,
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	want := `{"success":true,"sources":null,"target_name":"t","total_tracks":0,"unique_tracks":0,"duplicates_skipped":0,"dry_run":true,"duration_sec":0}`
+	want := `{"sources":null,"target_name":"t","total_tracks":0,"unique_tracks":0,"duplicates_skipped":0,"dry_run":true,"duration_sec":0,"success":true}`
 	if string(got) != want {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}

@@ -14,6 +14,10 @@ import (
 
 const (
 	maxLibraryBatchSize = 50
+
+	playlistURIPrefix = "spotify:playlist:"
+	playlistURLMarker = "open.spotify.com/playlist/"
+	spotifyIDLength   = 22
 )
 
 // ExtractPlaylistID inspects an input string and extracts a Spotify playlist ID if
@@ -22,44 +26,41 @@ const (
 // empty string and false if the input appears to be a plain playlist name.
 func ExtractPlaylistID(input string) (string, bool) {
 	input = strings.TrimSpace(input)
-	if input == "" {
-		return "", false
+
+	if id, ok := strings.CutPrefix(input, playlistURIPrefix); ok && id != "" {
+		return id, true
 	}
 
-	if strings.HasPrefix(input, "spotify:playlist:") {
-		id := strings.TrimPrefix(input, "spotify:playlist:")
-		if id != "" {
+	if _, rest, ok := strings.Cut(input, playlistURLMarker); ok {
+		id, _, _ := strings.Cut(rest, "?")
+		if id = strings.Trim(id, "/"); id != "" {
 			return id, true
 		}
 	}
 
-	if strings.Contains(input, "open.spotify.com/playlist/") {
-		parts := strings.Split(input, "open.spotify.com/playlist/")
-		if len(parts) > 1 {
-			idPart := parts[1]
-			if qIdx := strings.Index(idPart, "?"); qIdx != -1 {
-				idPart = idPart[:qIdx]
-			}
-			idPart = strings.Trim(idPart, "/")
-			if idPart != "" {
-				return idPart, true
-			}
-		}
-	}
-
-	if len(input) == 22 && isAlphanumeric(input) {
+	if isBase62ID(input) {
 		return input, true
 	}
 
 	return "", false
 }
 
-func isAlphanumeric(s string) bool {
+// isBase62ID reports whether s looks like a bare Spotify ID: 22 base62 chars.
+func isBase62ID(s string) bool {
+	if len(s) != spotifyIDLength {
+		return false
+	}
+
 	for _, r := range s {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+		isDigit := r >= '0' && r <= '9'
+		isLower := r >= 'a' && r <= 'z'
+		isUpper := r >= 'A' && r <= 'Z'
+
+		if !isDigit && !isLower && !isUpper {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -119,7 +120,12 @@ func BatchAddTracksToLibrary(
 		batch := trackIDs[i:end]
 
 		if err := client.AddTracksToLibrary(ctx, batch...); err != nil {
-			return fmt.Errorf("saving tracks batch %d-%d to library: %w (ensure 'syncer auth' has been run to grant 'user-library-modify' permission)", i, end-1, err)
+			return fmt.Errorf(
+				"saving tracks batch %d-%d to library: %w (ensure 'syncer auth' has been run to grant 'user-library-modify' permission)",
+				i,
+				end-1,
+				err,
+			)
 		}
 
 		logger.DebugContext(ctx, "saved tracks batch to library",

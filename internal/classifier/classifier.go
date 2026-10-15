@@ -5,13 +5,14 @@ package classifier
 import (
 	"context"
 	"log/slog"
-	"sort"
+	"maps"
+	"slices"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/zmb3/spotify/v2"
 
 	"spotify-syncer/internal/cache"
 	"spotify-syncer/internal/config"
+	"spotify-syncer/internal/set"
 )
 
 // ClassifyResult holds the result of classifying tracks into genre buckets.
@@ -41,7 +42,7 @@ func Classify(
 		artistGenres,
 	)
 
-	genreFrequency := buildGenreFrequency(trackGenreMap)
+	genreFrequency := buildGenreFrequency(trackIDs, trackGenreMap)
 
 	buckets := greedyBucketSelection(
 		ctx,
@@ -68,37 +69,31 @@ func buildTrackGenreMap(
 	trackIDs []spotify.ID,
 	trackArtists map[string][]string,
 	artistGenres map[string]cache.ArtistGenreEntry,
-) map[spotify.ID]mapset.Set[string] {
-	result := make(map[spotify.ID]mapset.Set[string])
+) map[spotify.ID]set.Set[string] {
+	result := make(map[spotify.ID]set.Set[string])
 
 	for _, trackID := range trackIDs {
-		trackIDStr := string(trackID)
-		artistIDs, ok := trackArtists[trackIDStr]
+		artistIDs, ok := trackArtists[string(trackID)]
 		if !ok || len(artistIDs) == 0 {
 			logger.DebugContext(ctx, "track has no artists, skipping genre assignment",
 				"track_id", trackID)
 			continue
 		}
 
-		combinedGenres := mapset.NewSet[string]()
+		combinedGenres := set.New[string](0)
 
 		for _, artistID := range artistIDs {
 			entry, found := artistGenres[artistID]
-			if !found || len(entry.Genres) == 0 {
+			if !found {
 				continue
 			}
 
-			topN := genresPerArtist
-			if len(entry.Genres) < topN {
-				topN = len(entry.Genres)
-			}
-
-			for i := range topN {
-				combinedGenres.Add(entry.Genres[i])
+			for _, genre := range entry.Genres[:min(len(entry.Genres), genresPerArtist)] {
+				combinedGenres.Add(genre)
 			}
 		}
 
-		if combinedGenres.Cardinality() > 0 {
+		if combinedGenres.Len() > 0 {
 			result[trackID] = combinedGenres
 		}
 	}
@@ -106,19 +101,17 @@ func buildTrackGenreMap(
 	return result
 }
 
-// buildGenreFrequency creates a frequency map from genre tag to the set of
-// track IDs that have that genre (via any of their artists).
+// buildGenreFrequency maps each genre tag to the tracks that have it (via any
+// of their artists), in the order the tracks appear in trackIDs.
 func buildGenreFrequency(
-	trackGenreMap map[spotify.ID]mapset.Set[string],
-) map[string]mapset.Set[spotify.ID] {
-	frequency := make(map[string]mapset.Set[spotify.ID])
+	trackIDs []spotify.ID,
+	trackGenreMap map[spotify.ID]set.Set[string],
+) map[string][]spotify.ID {
+	frequency := make(map[string][]spotify.ID)
 
-	for trackID, genres := range trackGenreMap {
-		for genre := range genres.Iter() {
-			if frequency[genre] == nil {
-				frequency[genre] = mapset.NewSet[spotify.ID]()
-			}
-			frequency[genre].Add(trackID)
+	for _, trackID := range trackIDs {
+		for genre := range trackGenreMap[trackID].All() {
+			frequency[genre] = append(frequency[genre], trackID)
 		}
 	}
 
@@ -126,25 +119,27 @@ func buildGenreFrequency(
 }
 
 // greedyBucketSelection implements the greedy frequency-based bucket selection
-// algorithm. It picks genres with the most unassigned tracks, creates buckets,
-// assigns tracks, and removes assigned tracks from other genre counts.
+// algorithm. It repeatedly picks the genre with the most unassigned tracks and
+// assigns those tracks to it, so each track lands in at most one bucket.
+// Selection is deterministic: ties go to the alphabetically first genre, and
+// bucket tracks keep their input order.
 func greedyBucketSelection(
 	ctx context.Context,
 	logger *slog.Logger,
 	cfg config.GenreConfig,
-	genreFrequency map[string]mapset.Set[spotify.ID],
+	genreFrequency map[string][]spotify.ID,
 ) map[string][]spotify.ID {
 	buckets := make(map[string][]spotify.ID)
-	assignedTracks := mapset.NewSet[spotify.ID]()
+	assignedTracks := set.New[spotify.ID](0)
 
 	for len(buckets) < cfg.MaxBuckets {
-		bestGenre := findBestGenre(genreFrequency, assignedTracks, cfg.MinBucketSize)
+		bestGenre, tracksToAssign := findBestGenre(genreFrequency, assignedTracks, cfg.MinBucketSize)
 		if bestGenre == "" {
 			break
 		}
 
-		tracksToAssign := genreFrequency[bestGenre].Difference(assignedTracks).ToSlice()
 		buckets[bestGenre] = tracksToAssign
+		delete(genreFrequency, bestGenre)
 
 		for _, trackID := range tracksToAssign {
 			assignedTracks.Add(trackID)
@@ -153,59 +148,32 @@ func greedyBucketSelection(
 		logger.InfoContext(ctx, "created genre bucket",
 			"genre", bestGenre,
 			"tracks", len(tracksToAssign))
-
-		removeAssignedTracks(genreFrequency, assignedTracks)
 	}
 
 	return buckets
 }
 
-// findBestGenre finds the genre with the most unassigned tracks that meets
-// the minimum bucket size threshold. Returns empty string if no genre qualifies.
+// findBestGenre returns the genre with the most unassigned tracks that meets
+// the minimum bucket size, along with those tracks. Ties go to the
+// alphabetically first genre. Returns "" if no genre qualifies.
 func findBestGenre(
-	genreFrequency map[string]mapset.Set[spotify.ID],
-	assignedTracks mapset.Set[spotify.ID],
+	genreFrequency map[string][]spotify.ID,
+	assignedTracks set.Set[spotify.ID],
 	minBucketSize int,
-) string {
-	type genreCount struct {
-		name  string
-		count int
-	}
+) (string, []spotify.ID) {
+	var (
+		bestGenre  string
+		bestTracks []spotify.ID
+	)
 
-	var candidates []genreCount
-
-	for genre, tracks := range genreFrequency {
-		unassigned := tracks.Difference(assignedTracks)
-		count := unassigned.Cardinality()
-		if count >= minBucketSize {
-			candidates = append(candidates, genreCount{
-				name:  genre,
-				count: count,
-			})
+	for _, genre := range slices.Sorted(maps.Keys(genreFrequency)) {
+		unassigned := set.Missing(genreFrequency[genre], assignedTracks)
+		if len(unassigned) >= minBucketSize && len(unassigned) > len(bestTracks) {
+			bestGenre, bestTracks = genre, unassigned
 		}
 	}
 
-	if len(candidates) == 0 {
-		return ""
-	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].count > candidates[j].count
-	})
-
-	return candidates[0].name
-}
-
-// removeAssignedTracks removes assigned tracks from all genre frequency counts.
-// This ensures that once a track is assigned to a bucket, it doesn't appear
-// in the unassigned count for other genres.
-func removeAssignedTracks(
-	genreFrequency map[string]mapset.Set[spotify.ID],
-	assignedTracks mapset.Set[spotify.ID],
-) {
-	for genre := range genreFrequency {
-		genreFrequency[genre] = genreFrequency[genre].Difference(assignedTracks)
-	}
+	return bestGenre, bestTracks
 }
 
 // countAssignedTracks returns the total number of tracks assigned across all buckets.

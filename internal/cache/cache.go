@@ -3,7 +3,6 @@
 package cache
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,7 +86,7 @@ func (s *Store) LoadToken() (*oauth2.Token, error) {
 
 // SaveToken atomically writes the OAuth2 token.
 func (s *Store) SaveToken(token *oauth2.Token) error {
-	return s.saveJSON(tokensFile, token)
+	return saveJSON(s, tokensFile, token)
 }
 
 // LoadTrackArtists reads the track-to-artist ID mapping.
@@ -97,7 +96,7 @@ func (s *Store) LoadTrackArtists() (map[string][]string, error) {
 
 // SaveTrackArtists atomically writes the track-to-artist ID mapping.
 func (s *Store) SaveTrackArtists(data map[string][]string) error {
-	return s.saveJSON(trackArtistsFile, data)
+	return saveJSON(s, trackArtistsFile, data)
 }
 
 // EvictTrackArtist removes a single track entry from the track-artist cache.
@@ -112,7 +111,7 @@ func (s *Store) LoadArtistGenres() (map[string]ArtistGenreEntry, error) {
 
 // SaveArtistGenres atomically writes the artist genre cache.
 func (s *Store) SaveArtistGenres(data map[string]ArtistGenreEntry) error {
-	return s.saveJSON(artistGenresFile, data)
+	return saveJSON(s, artistGenresFile, data)
 }
 
 // EvictArtistGenre removes a single artist entry from the genre cache.
@@ -127,7 +126,7 @@ func (s *Store) LoadTrackISRC() (map[string]string, error) {
 
 // SaveTrackISRC atomically writes the track-to-ISRC code mapping.
 func (s *Store) SaveTrackISRC(data map[string]string) error {
-	return s.saveJSON(trackISRCFile, data)
+	return saveJSON(s, trackISRCFile, data)
 }
 
 // EvictTrackISRC removes a single track entry from the ISRC cache.
@@ -142,7 +141,7 @@ func (s *Store) LoadMirrorTracks() ([]string, error) {
 
 // SaveMirrorTracks atomically writes the mirror playlist track IDs.
 func (s *Store) SaveMirrorTracks(trackIDs []string) error {
-	return s.saveJSON(mirrorTracksFile, trackIDs)
+	return saveJSON(s, mirrorTracksFile, trackIDs)
 }
 
 // EvictMirrorTracks removes the entire mirror tracks cache file.
@@ -157,7 +156,7 @@ func (s *Store) LoadBucketTracks() (map[string][]string, error) {
 
 // SaveBucketTracks atomically writes the genre bucket to track ID mapping.
 func (s *Store) SaveBucketTracks(data map[string][]string) error {
-	return s.saveJSON(bucketTracksFile, data)
+	return saveJSON(s, bucketTracksFile, data)
 }
 
 // EvictBucketTracks removes a single bucket from the bucket tracks cache.
@@ -172,7 +171,7 @@ func (s *Store) LoadPlaylists() (map[string]string, error) {
 
 // SavePlaylists atomically writes the playlist name-to-ID mapping.
 func (s *Store) SavePlaylists(data map[string]string) error {
-	return s.saveJSON(playlistsFile, data)
+	return saveJSON(s, playlistsFile, data)
 }
 
 // EvictPlaylist removes a single entry from the playlist cache.
@@ -187,7 +186,7 @@ func (s *Store) LoadCheckpoint() (Checkpoint, error) {
 
 // SaveCheckpoint atomically writes the fast-mode sync checkpoint.
 func (s *Store) SaveCheckpoint(cp Checkpoint) error {
-	return s.saveJSON(checkpointsFile, cp)
+	return saveJSON(s, checkpointsFile, cp)
 }
 
 // LoadMetrics reads the last run metrics.
@@ -197,7 +196,7 @@ func (s *Store) LoadMetrics() (RunMetrics, error) {
 
 // SaveMetrics atomically writes the run metrics.
 func (s *Store) SaveMetrics(m RunMetrics) error {
-	return s.saveJSON(metricsFile, m)
+	return saveJSON(s, metricsFile, m)
 }
 
 // IsCacheStaleError reports whether err indicates that cached data is stale.
@@ -208,8 +207,8 @@ func IsCacheStaleError(err error) bool {
 		return false
 	}
 
-	var spotifyErr spotify.Error
-	if !errors.As(err, &spotifyErr) {
+	spotifyErr, ok := errors.AsType[spotify.Error](err)
+	if !ok {
 		return false
 	}
 
@@ -221,40 +220,19 @@ func IsCacheStaleError(err error) bool {
 		strings.Contains(strings.ToLower(spotifyErr.Message), "invalid id")
 }
 
-// WithFallback attempts fn using the provided cached value. If fn returns a
-// stale cache error (as determined by IsCacheStaleError), it logs a warning,
-// calls fetch to obtain fresh data, and retries fn. The returned value is the
-// fresh data when a fallback occurred, or the original cached data otherwise.
-func WithFallback[V any](
-	ctx context.Context,
-	logger *slog.Logger,
-	key string,
-	cached V,
-	fn func(context.Context, V) error,
-	fetch func(context.Context) (V, error),
-) (V, error) {
-	err := fn(ctx, cached)
-	if err == nil || !IsCacheStaleError(err) {
-		return cached, err
-	}
-
-	logger.WarnContext(ctx, "stale cache detected, fetching fresh data",
-		"key", key, "error", err)
-
-	fresh, fetchErr := fetch(ctx)
-	if fetchErr != nil {
-		var zero V
-		return zero, fmt.Errorf("fallback fetch for %q: %w", key, fetchErr)
-	}
-
-	return fresh, fn(ctx, fresh)
-}
-
 func (s *Store) path(filename string) string {
 	return filepath.Join(s.dir, filename)
 }
 
-func (s *Store) saveJSON(filename string, data any) error {
+// storable lists every type the Store persists as JSON. Map-shaped files are
+// also handled as map[string]json.RawMessage when evicting single keys.
+type storable interface {
+	*oauth2.Token | Checkpoint | RunMetrics | []string |
+		map[string]string | map[string][]string | map[string]ArtistGenreEntry |
+		map[string]json.RawMessage
+}
+
+func saveJSON[T storable](s *Store, filename string, data T) error {
 	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", filename, err)
@@ -265,7 +243,7 @@ func (s *Store) saveJSON(filename string, data any) error {
 	return atomicWrite(s.path(filename), b)
 }
 
-func loadJSON[T any](fpath string) (T, error) {
+func loadJSON[T storable](fpath string) (T, error) {
 	var zero T
 
 	data, err := os.ReadFile(fpath)
@@ -332,19 +310,21 @@ func atomicWrite(target string, data []byte) error {
 	return nil
 }
 
+// evictMapKey removes key from a map-shaped state file without decoding the
+// other entries.
 func evictMapKey(s *Store, filename, key string) error {
-	m, err := loadJSON[map[string]any](s.path(filename))
+	m, err := loadJSON[map[string]json.RawMessage](s.path(filename))
 	if err != nil {
 		return err
 	}
 
-	if m == nil {
+	if _, ok := m[key]; !ok {
 		return nil
 	}
 
 	delete(m, key)
 
-	return s.saveJSON(filename, m)
+	return saveJSON(s, filename, m)
 }
 
 func removeFile(fpath string) error {

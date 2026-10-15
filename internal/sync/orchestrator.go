@@ -7,13 +7,13 @@ import (
 	"log/slog"
 	"time"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/zmb3/spotify/v2"
 
 	"spotify-syncer/internal/cache"
 	"spotify-syncer/internal/classifier"
 	"spotify-syncer/internal/config"
 	"spotify-syncer/internal/dedup"
+	"spotify-syncer/internal/set"
 	"spotify-syncer/internal/spotifyio"
 )
 
@@ -169,6 +169,12 @@ func syncMirrorPlaylist(
 	return mirrorResult, nil
 }
 
+// bucketCounts reports how many genre playlists a sync created and removed.
+type bucketCounts struct {
+	BucketsCreated int
+	BucketsRemoved int
+}
+
 // syncGenrePlaylists syncs genre playlists by fetching artist genres, classifying tracks, and syncing buckets.
 func syncGenrePlaylists(
 	ctx context.Context,
@@ -179,10 +185,7 @@ func syncGenrePlaylists(
 	trackIDs []spotify.ID,
 	trackArtists map[string][]string,
 	forceRefresh bool,
-) (struct {
-	BucketsCreated int
-	BucketsRemoved int
-}, error) {
+) (bucketCounts, error) {
 	artistGenres, err := fetchArtistGenres(
 		ctx,
 		logger,
@@ -193,10 +196,7 @@ func syncGenrePlaylists(
 		trackArtists,
 	)
 	if err != nil {
-		return struct {
-			BucketsCreated int
-			BucketsRemoved int
-		}{}, fmt.Errorf("fetching artist genres: %w", err)
+		return bucketCounts{}, fmt.Errorf("fetching artist genres: %w", err)
 	}
 
 	classifyResult, err := classifier.Classify(
@@ -208,10 +208,7 @@ func syncGenrePlaylists(
 		artistGenres,
 	)
 	if err != nil {
-		return struct {
-			BucketsCreated int
-			BucketsRemoved int
-		}{}, fmt.Errorf("classifying tracks: %w", err)
+		return bucketCounts{}, fmt.Errorf("classifying tracks: %w", err)
 	}
 
 	genreResult, err := Genres(
@@ -224,16 +221,10 @@ func syncGenrePlaylists(
 		forceRefresh,
 	)
 	if err != nil {
-		return struct {
-			BucketsCreated int
-			BucketsRemoved int
-		}{}, fmt.Errorf("syncing genre playlists: %w", err)
+		return bucketCounts{}, fmt.Errorf("syncing genre playlists: %w", err)
 	}
 
-	return struct {
-		BucketsCreated int
-		BucketsRemoved int
-	}{
+	return bucketCounts{
 		BucketsCreated: len(classifyResult.Buckets),
 		BucketsRemoved: genreResult.BucketsRemoved,
 	}, nil
@@ -261,23 +252,23 @@ func completeRun(
 		logger.WarnContext(ctx, "failed to save metrics", "error", err)
 	}
 
-	logFields := []any{
-		"liked_total", metrics.LikedTotal,
-		"dedup_removed", metrics.DedupRemoved,
-		"mirror_added", metrics.MirrorAdded,
-		"mirror_removed", metrics.MirrorRemoved,
+	attrs := []slog.Attr{
+		slog.Int("liked_total", metrics.LikedTotal),
+		slog.Int("dedup_removed", metrics.DedupRemoved),
+		slog.Int("mirror_added", metrics.MirrorAdded),
+		slog.Int("mirror_removed", metrics.MirrorRemoved),
 	}
 
 	if includeBuckets {
-		logFields = append(logFields,
-			"buckets_created", metrics.BucketsCreated,
-			"buckets_removed", metrics.BucketsRemoved,
+		attrs = append(attrs,
+			slog.Int("buckets_created", metrics.BucketsCreated),
+			slog.Int("buckets_removed", metrics.BucketsRemoved),
 		)
 	}
 
-	logFields = append(logFields, "duration", metrics.FinishedAt.Sub(metrics.StartedAt))
+	attrs = append(attrs, slog.Duration("duration", metrics.FinishedAt.Sub(metrics.StartedAt)))
 
-	logger.InfoContext(ctx, logMessage, logFields...)
+	logger.LogAttrs(ctx, slog.LevelInfo, logMessage, attrs...)
 
 	return RunResult{
 		Metrics: *metrics,
@@ -421,21 +412,12 @@ func collectUniqueArtistIDs(
 	trackIDs []spotify.ID,
 	trackArtists map[string][]string,
 ) []string {
-	artistSet := mapset.NewSet[string]()
-
+	var artistIDs []string
 	for _, trackID := range trackIDs {
-		trackIDStr := string(trackID)
-		artistIDs, ok := trackArtists[trackIDStr]
-		if !ok {
-			continue
-		}
-
-		for _, artistID := range artistIDs {
-			artistSet.Add(artistID)
-		}
+		artistIDs = append(artistIDs, trackArtists[string(trackID)]...)
 	}
 
-	return artistSet.ToSlice()
+	return set.Missing(artistIDs, set.New[string](0))
 }
 
 // filterUnknownOrExpiredArtists returns artist IDs that are either not in the

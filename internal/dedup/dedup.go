@@ -2,10 +2,11 @@
 package dedup
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/zmb3/spotify/v2"
@@ -94,40 +95,36 @@ func DeduplicateTracks(
 // selectRepresentative picks the best representative track from a group of
 // tracks with the same ISRC. Selection criteria (in order):
 // 1. Prefer playable tracks over non-playable
-// 2. Prefer most recently added (latest AddedAt).
+// 2. Prefer most recently added (latest AddedAt)
+// 3. Prefer the lowest track ID, so the choice is deterministic.
 func selectRepresentative(group []spotifyio.LikedTrackData) spotifyio.LikedTrackData {
-	if len(group) == 0 {
-		panic("empty group passed to selectRepresentative")
+	return slices.MinFunc(group, compareRepresentatives)
+}
+
+// compareRepresentatives orders a before b when a is the better representative.
+func compareRepresentatives(a, b spotifyio.LikedTrackData) int {
+	if a.IsPlayable != b.IsPlayable {
+		if a.IsPlayable {
+			return -1
+		}
+		return 1
 	}
 
-	if len(group) == 1 {
-		return group[0]
+	timeA, errA := parseAddedAt(a.AddedAt)
+	timeB, errB := parseAddedAt(b.AddedAt)
+
+	switch {
+	case errA == nil && errB != nil:
+		return -1
+	case errA != nil && errB == nil:
+		return 1
+	case errA == nil && errB == nil:
+		if c := timeB.Compare(timeA); c != 0 {
+			return c // newer first
+		}
 	}
 
-	sort.Slice(group, func(i, j int) bool {
-		ti, tj := group[i], group[j]
-
-		if ti.IsPlayable != tj.IsPlayable {
-			return ti.IsPlayable
-		}
-
-		timeI, errI := parseAddedAt(ti.AddedAt)
-		timeJ, errJ := parseAddedAt(tj.AddedAt)
-
-		if errI != nil && errJ != nil {
-			return false
-		}
-		if errI != nil {
-			return false
-		}
-		if errJ != nil {
-			return true
-		}
-
-		return timeI.After(timeJ)
-	})
-
-	return group[0]
+	return cmp.Compare(a.TrackID, b.TrackID)
 }
 
 // parseAddedAt parses the AddedAt timestamp string from Spotify's API.

@@ -34,11 +34,6 @@ func FindOrCreatePlaylist(
 		fullName = prefix + name
 	}
 
-	user, err := client.CurrentUser(ctx)
-	if err != nil {
-		return "", fmt.Errorf("getting current user: %w", err)
-	}
-
 	playlistID, found, err := findPlaylistByName(ctx, client, fullName)
 	if err != nil {
 		return "", fmt.Errorf("searching for playlist %q: %w", fullName, err)
@@ -51,13 +46,31 @@ func FindOrCreatePlaylist(
 		return playlistID, nil
 	}
 
-	playlist, err := client.CreatePlaylistForUser(ctx, user.ID, fullName, "", public, false)
+	return CreatePlaylist(ctx, logger, client, fullName, "", public)
+}
+
+// CreatePlaylist creates a new, non-collaborative playlist owned by the
+// current user and returns its ID.
+func CreatePlaylist(
+	ctx context.Context,
+	logger *slog.Logger,
+	client *spotify.Client,
+	name string,
+	description string,
+	public bool,
+) (spotify.ID, error) {
+	user, err := client.CurrentUser(ctx)
 	if err != nil {
-		return "", fmt.Errorf("creating playlist %q: %w", fullName, err)
+		return "", fmt.Errorf("getting current user: %w", err)
+	}
+
+	playlist, err := client.CreatePlaylistForUser(ctx, user.ID, name, description, public, false)
+	if err != nil {
+		return "", fmt.Errorf("creating playlist %q: %w", name, err)
 	}
 
 	logger.InfoContext(ctx, "created new playlist",
-		"name", fullName,
+		"name", name,
 		"playlist_id", playlist.ID)
 
 	return playlist.ID, nil

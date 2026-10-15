@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/zmb3/spotify/v2"
 
 	"spotify-syncer/internal/cache"
+	"spotify-syncer/internal/set"
 	"spotify-syncer/internal/spotifyio"
 )
 
@@ -33,8 +33,9 @@ type syncResult struct {
 }
 
 // syncPlaylist synchronizes a playlist with its desired track set. It computes
-// the diff, applies batch add/remove operations, and updates the cache.
-// Supports cache fallback if cached data is stale.
+// the diff against the cached (or fetched) current tracks, applies batch
+// add/remove operations, and updates the cache. If the cached contents turn
+// out to be stale, it re-fetches the playlist and retries once.
 func syncPlaylist(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -46,80 +47,29 @@ func syncPlaylist(
 		return syncResult{}, err
 	}
 
-	desiredSet := mapset.NewSet(cfg.desiredTracks...)
-	currentSet := mapset.NewSet(currentTracks...)
-
-	toAdd := desiredSet.Difference(currentSet).ToSlice()
-	toRemove := currentSet.Difference(desiredSet).ToSlice()
-
-	logger.InfoContext(ctx, fmt.Sprintf("computed %s playlist diff", cfg.logContext),
-		"current_tracks", currentSet.Cardinality(),
-		"desired_tracks", desiredSet.Cardinality(),
-		"to_add", len(toAdd),
-		"to_remove", len(toRemove))
-
-	if len(toAdd) > 0 {
-		err = spotifyio.BatchAddTracks(
-			ctx,
-			logger,
-			client,
-			cfg.playlistID,
-			toAdd,
-			cfg.batchSize,
-		)
-		if err != nil {
-			if cache.IsCacheStaleError(err) {
-				logger.WarnContext(
-					ctx,
-					fmt.Sprintf("stale cache detected during add, falling back to API fetch for %s", cfg.logContext),
-					"error",
-					err,
-				)
-				return syncPlaylistWithFallback(ctx, logger, client, cfg)
-			}
-			return syncResult{}, fmt.Errorf("adding tracks to %s playlist: %w", cfg.logContext, err)
+	result, err := applyDiff(ctx, logger, client, cfg, currentTracks)
+	if err != nil {
+		if !cache.IsCacheStaleError(err) {
+			return syncResult{}, err
 		}
+
+		logger.WarnContext(ctx, "stale cache detected, falling back to API fetch",
+			"playlist", cfg.logContext,
+			"error", err)
+
+		return syncPlaylistWithFallback(ctx, logger, client, cfg)
 	}
 
-	if len(toRemove) > 0 {
-		err = spotifyio.BatchRemoveTracks(
-			ctx,
-			logger,
-			client,
-			cfg.playlistID,
-			toRemove,
-			cfg.batchSize,
-		)
-		if err != nil {
-			if cache.IsCacheStaleError(err) {
-				logger.WarnContext(
-					ctx,
-					fmt.Sprintf("stale cache detected during remove, falling back to API fetch for %s", cfg.logContext),
-					"error",
-					err,
-				)
-				return syncPlaylistWithFallback(ctx, logger, client, cfg)
-			}
-			return syncResult{}, fmt.Errorf("removing tracks from %s playlist: %w", cfg.logContext, err)
-		}
-	}
+	logger.InfoContext(ctx, "playlist sync complete",
+		"playlist", cfg.logContext,
+		"added", result.Added,
+		"removed", result.Removed)
 
-	if saveErr := cfg.saveCache(cfg.desiredTracks); saveErr != nil {
-		return syncResult{}, fmt.Errorf("saving %s tracks cache: %w", cfg.logContext, saveErr)
-	}
-
-	logger.InfoContext(ctx, fmt.Sprintf("%s playlist sync complete", cfg.logContext),
-		"added", len(toAdd),
-		"removed", len(toRemove))
-
-	return syncResult{
-		Added:   len(toAdd),
-		Removed: len(toRemove),
-	}, nil
+	return result, nil
 }
 
-// syncPlaylistWithFallback handles cache fallback: evicts cache, fetches fresh
-// data, and retries the sync operation.
+// syncPlaylistWithFallback evicts the playlist cache, fetches the current
+// tracks from the API, and applies the diff against them.
 func syncPlaylistWithFallback(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -128,57 +78,61 @@ func syncPlaylistWithFallback(
 ) (syncResult, error) {
 	if cfg.evictCache != nil {
 		if evictErr := cfg.evictCache(); evictErr != nil {
-			logger.WarnContext(ctx, fmt.Sprintf("failed to evict %s tracks cache", cfg.logContext), "error", evictErr)
+			logger.WarnContext(ctx, "failed to evict tracks cache",
+				"playlist", cfg.logContext,
+				"error", evictErr)
 		}
 	}
 
-	fetched, fetchErr := spotifyio.FetchPlaylistTrackIDs(ctx, logger, client, cfg.playlistID)
-	if fetchErr != nil {
-		return syncResult{}, fmt.Errorf("fetching fresh %s playlist tracks: %w", cfg.logContext, fetchErr)
+	fetched, err := spotifyio.FetchPlaylistTrackIDs(ctx, logger, client, cfg.playlistID)
+	if err != nil {
+		return syncResult{}, fmt.Errorf("fetching fresh %s playlist tracks: %w", cfg.logContext, err)
 	}
 
-	desiredSet := mapset.NewSet(cfg.desiredTracks...)
-	currentSet := mapset.NewSet(fetched...)
+	return applyDiff(ctx, logger, client, cfg, fetched)
+}
 
-	toAdd := desiredSet.Difference(currentSet).ToSlice()
-	toRemove := currentSet.Difference(desiredSet).ToSlice()
+// applyDiff adds the desired tracks missing from current, removes the current
+// tracks that are no longer desired, and saves the desired set to the cache.
+// Errors from the API are wrapped with %w so callers can detect stale caches.
+func applyDiff(
+	ctx context.Context,
+	logger *slog.Logger,
+	client *spotify.Client,
+	cfg syncConfig,
+	current []spotify.ID,
+) (syncResult, error) {
+	toAdd, toRemove := diffTracks(cfg.desiredTracks, current)
 
-	if len(toAdd) > 0 {
-		addErr := spotifyio.BatchAddTracks(
-			ctx,
-			logger,
-			client,
-			cfg.playlistID,
-			toAdd,
-			cfg.batchSize,
-		)
-		if addErr != nil {
-			return syncResult{}, fmt.Errorf("adding tracks after fallback: %w", addErr)
-		}
+	logger.InfoContext(ctx, "computed playlist diff",
+		"playlist", cfg.logContext,
+		"current_tracks", len(current),
+		"desired_tracks", len(cfg.desiredTracks),
+		"to_add", len(toAdd),
+		"to_remove", len(toRemove))
+
+	if err := spotifyio.BatchAddTracks(ctx, logger, client, cfg.playlistID, toAdd, cfg.batchSize); err != nil {
+		return syncResult{}, fmt.Errorf("adding tracks to %s playlist: %w", cfg.logContext, err)
 	}
 
-	if len(toRemove) > 0 {
-		removeErr := spotifyio.BatchRemoveTracks(
-			ctx,
-			logger,
-			client,
-			cfg.playlistID,
-			toRemove,
-			cfg.batchSize,
-		)
-		if removeErr != nil {
-			return syncResult{}, fmt.Errorf("removing tracks after fallback: %w", removeErr)
-		}
+	if err := spotifyio.BatchRemoveTracks(ctx, logger, client, cfg.playlistID, toRemove, cfg.batchSize); err != nil {
+		return syncResult{}, fmt.Errorf("removing tracks from %s playlist: %w", cfg.logContext, err)
 	}
 
-	if saveErr := cfg.saveCache(cfg.desiredTracks); saveErr != nil {
-		return syncResult{}, fmt.Errorf("saving %s tracks cache after fallback: %w", cfg.logContext, saveErr)
+	if err := cfg.saveCache(cfg.desiredTracks); err != nil {
+		return syncResult{}, fmt.Errorf("saving %s tracks cache: %w", cfg.logContext, err)
 	}
 
-	return syncResult{
-		Added:   len(toAdd),
-		Removed: len(toRemove),
-	}, nil
+	return syncResult{Added: len(toAdd), Removed: len(toRemove)}, nil
+}
+
+// diffTracks returns the desired tracks missing from current (in desired
+// order) and the current tracks not desired (in current order). Ordering
+// matters: added tracks land in the playlist in the same order as desired.
+func diffTracks(desired, current []spotify.ID) ([]spotify.ID, []spotify.ID) {
+	toAdd := set.Missing(desired, set.Of(current...))
+	toRemove := set.Missing(current, set.Of(desired...))
+	return toAdd, toRemove
 }
 
 // loadCurrentTracks loads current tracks from cache or API based on forceRefresh flag.

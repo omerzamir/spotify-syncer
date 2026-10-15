@@ -43,6 +43,9 @@ type MergeResult struct {
 	DurationSec       float64              `json:"duration_sec"`
 }
 
+// MinMergeSources is the minimum number of source playlists for a merge.
+const MinMergeSources = 2
+
 // MergePlaylists merges tracks from two or more source playlists into a newly created playlist.
 // Source playlists can be identified by name, Spotify ID, or Spotify URL/URI.
 func MergePlaylists(
@@ -54,7 +57,7 @@ func MergePlaylists(
 ) (MergeResult, error) {
 	start := time.Now()
 
-	if len(mergeCfg.Sources) < 2 {
+	if len(mergeCfg.Sources) < MinMergeSources {
 		return MergeResult{}, errors.New("at least two source playlists are required to merge")
 	}
 
