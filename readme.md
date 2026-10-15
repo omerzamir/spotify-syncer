@@ -10,6 +10,7 @@ A Go CLI tool that syncs your liked/saved songs into playlists:
 - **Dynamic genre discovery**: Automatically creates genre playlists based on your library
 - **Aggressive caching**: Minimizes API calls by caching artist genres, playlist contents, and track metadata
 - **Rate limiting**: Built-in rate limiting with automatic retry on 429 responses
+- **Reverse sync**: Add all songs from any playlist (by name, ID, or URL) into your Liked Songs library
 - **Fast mode**: Incremental sync support (coming soon)
 
 ## Getting Started
@@ -95,6 +96,9 @@ Runs the sync operation: fetches liked tracks, syncs mirror playlist, and option
 - `--mode`: Sync mode - `full` or `fast` (default: `full`)
 - `--genres`: Enable genre playlist sync (default: `true`)
 - `--force-refresh`: Force refresh of cached playlist contents (default: `false`)
+- `--reverse`: Reverse mode - add songs from playlist to liked songs (default: `false`)
+- `--playlist`: Target playlist name, ID, or URL for reverse mode (default: `mirror_playlist_name` from config)
+- `--dry-run`: Dry-run mode for reverse sync (default: `false`)
 - `--config`: Path to config file (default: `config.yaml` in current directory)
 
 **Exit Codes:**
@@ -119,6 +123,32 @@ The `run` command outputs a JSON summary to stdout:
   "duplicate_ids": ["spotify:track:abc123", "spotify:track:def456"]
 }
 ```
+
+### `syncer reverse`
+
+Adds all songs from a playlist (by name, ID, or URL) into your Liked Songs library. Tracks that are already liked are skipped to preserve their original added date.
+
+**Flags:**
+- `--playlist`: Playlist name, Spotify ID, or Spotify URL (default: `mirror_playlist_name` from config)
+- `--dry-run`: Preview tracks that would be added without making changes (default: `false`)
+- `--batch-size`: Batch size for saving tracks (1-50, default: `50`)
+- `--config`: Path to config file (default: `config.yaml` in current directory)
+
+**Output:**
+
+```json
+{
+  "success": true,
+  "playlist_name": "Public Liked Songs",
+  "playlist_id": "37i9dQZF1DXcBWIGoYBM5M",
+  "total_tracks": 150,
+  "already_liked": 120,
+  "newly_added": 30,
+  "dry_run": false,
+  "duration_sec": 3.4
+}
+```
+
 
 ## Cron Integration
 

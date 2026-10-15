@@ -57,12 +57,18 @@ func setupCommands() *cobra.Command {
 	var mode string
 	var enableGenres bool
 	var forceRefresh bool
+	var isReverse bool
+	var reversePlaylistFlag string
+	var reverseDryRunFlag bool
 
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the sync operation",
 		Long:  "Fetches liked tracks, syncs mirror playlist, and optionally syncs genre playlists",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if isReverse {
+				return runReverse(configPath, reversePlaylistFlag, reverseDryRunFlag, 50)
+			}
 			return runSync(configPath, mode, enableGenres, forceRefresh)
 		},
 	}
@@ -70,9 +76,30 @@ func setupCommands() *cobra.Command {
 	runCmd.Flags().StringVar(&mode, "mode", "full", "Sync mode: full or fast")
 	runCmd.Flags().BoolVar(&enableGenres, "genres", true, "Enable genre playlist sync")
 	runCmd.Flags().BoolVar(&forceRefresh, "force-refresh", false, "Force refresh of cached playlist contents")
+	runCmd.Flags().BoolVar(&isReverse, "reverse", false, "Reverse mode: add songs from playlist to liked songs")
+	runCmd.Flags().StringVar(&reversePlaylistFlag, "playlist", "", "Playlist name, ID, or URL for reverse mode (default: mirror_playlist_name from config)")
+	runCmd.Flags().BoolVar(&reverseDryRunFlag, "dry-run", false, "Dry run mode (for reverse sync)")
+
+	var reversePlaylist string
+	var reverseDryRun bool
+	var reverseBatchSize int
+
+	reverseCmd := &cobra.Command{
+		Use:   "reverse",
+		Short: "Add all songs from a playlist to liked songs",
+		Long:  "Fetches tracks from a playlist (by name, ID, or URL) and saves them to your Liked Songs library",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runReverse(configPath, reversePlaylist, reverseDryRun, reverseBatchSize)
+		},
+	}
+
+	reverseCmd.Flags().StringVar(&reversePlaylist, "playlist", "", "Playlist name, ID, or URL (default: mirror_playlist_name from config)")
+	reverseCmd.Flags().BoolVar(&reverseDryRun, "dry-run", false, "Preview tracks that would be added without actually adding them")
+	reverseCmd.Flags().IntVar(&reverseBatchSize, "batch-size", 50, "Batch size for saving tracks (max 50)")
 
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(reverseCmd)
 
 	return rootCmd
 }
@@ -190,6 +217,73 @@ func runSync(configPath, mode string, enableGenres, forceRefresh bool) error {
 		return errors.New("sync run completed with errors")
 	}
 
+	return nil
+}
+
+func runReverse(configPath, playlistIdentifier string, dryRun bool, batchSize int) error {
+	cfg, logger := loadConfigAndLogger(configPath, false)
+
+	store, err := cache.NewStore(cfg.StateDir, logger)
+	if err != nil {
+		return fmt.Errorf("creating cache store: %w", err)
+	}
+
+	token, err := store.LoadToken()
+	if err != nil {
+		return fmt.Errorf("loading token: %w", err)
+	}
+
+	if token == nil {
+		log.Printf("no saved token found, run 'syncer auth' first")
+		return errors.New("no saved token found, run 'syncer auth' first")
+	}
+
+	ctx, cancel := setupContextWithLogger(logger)
+	defer cancel()
+
+	tokenSource := auth.NewTokenSource(ctx, cfg.Spotify, token)
+	client, err := spotifyio.NewClient(ctx, logger, cfg, tokenSource)
+	if err != nil {
+		return fmt.Errorf("creating Spotify client: %w", err)
+	}
+
+	updatedToken, err := tokenSource.Token()
+	if err != nil {
+		return fmt.Errorf("getting token: %w", err)
+	}
+
+	if updatedToken.AccessToken != token.AccessToken {
+		if saveErr := store.SaveToken(updatedToken); saveErr != nil {
+			logger.WarnContext(ctx, "failed to save refreshed token", "error", saveErr)
+		}
+	}
+
+	result, err := sync.Reverse(ctx, logger, cfg, client, sync.ReverseConfig{
+		PlaylistIdentifier: playlistIdentifier,
+		BatchSize:          batchSize,
+		DryRun:             dryRun,
+	})
+	if err != nil {
+		return fmt.Errorf("reverse sync failed: %w", err)
+	}
+
+	summary := map[string]interface{}{
+		"success":       true,
+		"playlist_name": result.PlaylistName,
+		"playlist_id":   result.PlaylistID,
+		"total_tracks":  result.TotalTracks,
+		"already_liked": result.AlreadyLiked,
+		"newly_added":   result.NewlyAdded,
+		"dry_run":       result.DryRun,
+		"duration_sec":  result.DurationSec,
+	}
+
+	summaryJSON, err := json.Marshal(summary)
+	if err != nil {
+		return fmt.Errorf("marshaling summary: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "%s\n", summaryJSON)
 	return nil
 }
 

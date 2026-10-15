@@ -139,6 +139,7 @@ func requiredScopes() []string {
 		spotifyauth.ScopeUserReadPrivate,
 		spotifyauth.ScopePlaylistReadPrivate,
 		spotifyauth.ScopeUserLibraryRead,
+		spotifyauth.ScopeUserLibraryModify,
 		spotifyauth.ScopePlaylistModifyPublic,
 		spotifyauth.ScopePlaylistModifyPrivate,
 	}
