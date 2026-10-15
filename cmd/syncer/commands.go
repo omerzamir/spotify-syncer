@@ -184,7 +184,7 @@ func runReverse(ctx context.Context, configPath string, reverseCfg sync.ReverseC
 	}
 	defer s.close(ctx)
 
-	result, err := sync.Reverse(ctx, s.logger, s.cfg, s.client, s.store, reverseCfg)
+	result, err := sync.Reverse(ctx, s.logger, s.client, s.store, reverseCfg)
 	if err != nil {
 		return fmt.Errorf("reverse sync failed: %w", err)
 	}

@@ -34,7 +34,7 @@ func TestReverseWithoutSyncStateFetchesLibraryAndMatchesByISRC(t *testing.T) {
 		},
 	})
 
-	result, err := sync.Reverse(t.Context(), testLogger(), testConfig(), fake.Client(), testStore(t),
+	result, err := sync.Reverse(t.Context(), testLogger(), fake.Client(), testStore(t),
 		sync.ReverseConfig{PlaylistIdentifier: playlistID, BatchSize: 50})
 	if err != nil {
 		t.Fatalf("Reverse: %v", err)
@@ -84,7 +84,7 @@ func TestReverseWithSyncStateUsesCacheAndVerifiesMatches(t *testing.T) {
 	})
 	fake.ResetRequests()
 
-	result, err := sync.Reverse(t.Context(), testLogger(), testConfig(), fake.Client(), store,
+	result, err := sync.Reverse(t.Context(), testLogger(), fake.Client(), store,
 		sync.ReverseConfig{PlaylistIdentifier: "Source", BatchSize: 50})
 	if err != nil {
 		t.Fatalf("Reverse: %v", err)
@@ -129,7 +129,7 @@ func TestReverseCachedTrackUnlikedButSiblingStillLikedIsNotAdded(t *testing.T) {
 	})
 	fake.ResetRequests()
 
-	result, err := sync.Reverse(t.Context(), testLogger(), testConfig(), fake.Client(), store,
+	result, err := sync.Reverse(t.Context(), testLogger(), fake.Client(), store,
 		sync.ReverseConfig{PlaylistIdentifier: "Source", BatchSize: 50})
 	if err != nil {
 		t.Fatalf("Reverse: %v", err)
@@ -155,7 +155,7 @@ func TestReverseDryRunSavesNothing(t *testing.T) {
 		Tracks: []spotifytest.Track{{ID: "a", ISRC: "X"}},
 	})
 
-	result, err := sync.Reverse(t.Context(), testLogger(), testConfig(), fake.Client(), testStore(t),
+	result, err := sync.Reverse(t.Context(), testLogger(), fake.Client(), testStore(t),
 		sync.ReverseConfig{PlaylistIdentifier: "Source", BatchSize: 50, DryRun: true})
 	if err != nil {
 		t.Fatalf("Reverse: %v", err)
@@ -180,7 +180,7 @@ func TestReverseFromFollowedPlaylistFallsBackToLegacyEndpoint(t *testing.T) {
 		Tracks: []spotifytest.Track{{ID: "a", ISRC: "A"}, {ID: "b", ISRC: "B"}},
 	})
 
-	result, err := sync.Reverse(t.Context(), testLogger(), testConfig(), fake.Client(), testStore(t),
+	result, err := sync.Reverse(t.Context(), testLogger(), fake.Client(), testStore(t),
 		sync.ReverseConfig{PlaylistIdentifier: "Someone Else's Mix", BatchSize: 40})
 	if err != nil {
 		t.Fatalf("Reverse: %v", err)
@@ -200,7 +200,7 @@ func TestReverseFromFollowedPlaylistFallsBackToLegacyEndpoint(t *testing.T) {
 func TestReverseRequiresSourcePlaylist(t *testing.T) {
 	fake := spotifytest.NewServer(t)
 
-	_, err := sync.Reverse(t.Context(), testLogger(), testConfig(), fake.Client(), testStore(t),
+	_, err := sync.Reverse(t.Context(), testLogger(), fake.Client(), testStore(t),
 		sync.ReverseConfig{BatchSize: 40})
 	if !errors.Is(err, sync.ErrNoReverseSource) {
 		t.Fatalf("Reverse error = %v, want ErrNoReverseSource", err)

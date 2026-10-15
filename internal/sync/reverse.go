@@ -11,7 +11,6 @@ import (
 	"github.com/omerzamir/spotify/v2"
 
 	"spotify-syncer/internal/cache"
-	"spotify-syncer/internal/config"
 	"spotify-syncer/internal/dedup"
 	"spotify-syncer/internal/spotifyio"
 )
@@ -52,7 +51,6 @@ type ReverseResult struct {
 func Reverse(
 	ctx context.Context,
 	logger *slog.Logger,
-	_ config.Config,
 	client *spotify.Client,
 	store *cache.Store,
 	reverseCfg ReverseConfig,
